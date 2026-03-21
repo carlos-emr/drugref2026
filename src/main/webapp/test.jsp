@@ -1,7 +1,21 @@
+<%--
+  Copyright (c) 2026 CARLOS EMR Project Contributors. All Rights Reserved.
 
+  This program is free software: you can redistribute it and/or modify
+  it under the terms of the GNU Affero General Public License as
+  published by the Free Software Foundation, either version 3 of the
+  License, or (at your option) any later version.
 
+  This program is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+  GNU Affero General Public License for more details.
+
+  You should have received a copy of the GNU Affero General Public License
+  along with this program. If not, see <https://www.gnu.org/licenses/>.
+--%>
 <%@page contentType="text/html" pageEncoding="UTF-8"%>
-<%@page import="org.apache.xmlrpc.*,java.util.*" %>
+<%@page import="io.github.carlos_emr.drugref2026.util.SimpleXmlRpcClient,io.github.carlos_emr.drugref2026.util.XmlRpcFaultException,java.util.*" %>
 <!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN"
     "http://www.w3.org/TR/html4/loose.dtd">
 
@@ -204,28 +218,8 @@ private Object callWebserviceLite(String procedureName,Vector params) throws Exc
          Object object = new Object();
          try{
              System.out.println("in callWebserviceLite");
-            // System.out.println("server_url :"+server_url);
-           // XmlRpcClientLite server = new XmlRpcClientLite("http://localhost:8084/DrugrefService");
-             XmlRpcClientLite server = new XmlRpcClientLite("http://localhost:8084/drugref2/DrugrefService");
-            // XmlRpcClientLite server = new XmlRpcClientLite("http://localhost:4082/drugref2/DrugrefService");
+             SimpleXmlRpcClient server = new SimpleXmlRpcClient("http://localhost:8080/drugref2/DrugrefService");
             System.out.println("procedureName="+procedureName);
-            //XmlRpcClientLite server = new XmlRpcClientLite("http://localhost:4080/drugref2/DrugrefService");
-            System.out.println("server's url :"+server.getURL());
-            System.out.println("server="+server);
-            //server.
-            /*try{
-                String[] args=new String[3];
-                args[0]="http://localhost:8084/DrugrefService";
-                args[1]=procedureName;
-                args[2]="testParam";
-                System.out.println("before main");
-                server.main(args);
-                System.out.println("after main");
-            }
-            catch(Exception e){
-                System.out.println("main's e: ");
-                e.printStackTrace();
-            }*/
             object = (Object) server.execute(procedureName, params);
             System.out.println("Object in callWebserviceLite:       "+object);
          }catch (Exception exception) {

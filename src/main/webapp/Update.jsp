@@ -1,11 +1,23 @@
-<%-- 
-    Document   : Update
-    Created on : Sep 12, 2009, 12:30:21 PM
-    Author     : jaygallagher
+<%--
+  Copyright (c) 2026 CARLOS EMR Project Contributors. All Rights Reserved.
+
+  Originally: Created Sep 12, 2009 by jaygallagher.
+  This program is free software: you can redistribute it and/or modify
+  it under the terms of the GNU Affero General Public License as
+  published by the Free Software Foundation, either version 3 of the
+  License, or (at your option) any later version.
+
+  This program is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+  GNU Affero General Public License for more details.
+
+  You should have received a copy of the GNU Affero General Public License
+  along with this program. If not, see <https://www.gnu.org/licenses/>.
 --%>
 
 <%@page contentType="text/html" pageEncoding="MacRoman"%>
-<%@page import="java.util.*,org.drugref.ca.dpd.history.*" %>
+<%@page import="java.util.*,io.github.carlos_emr.drugref2026.ca.dpd.history.*" %>
 <!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN"
    "http://www.w3.org/TR/html4/loose.dtd">
 
@@ -17,11 +29,11 @@
     <body>
         <h1>Update Drugref Database!</h1>
          <%
-        org.drugref.ca.dpd.fetch.DPDImport dpdImport = new org.drugref.ca.dpd.fetch.DPDImport();
+        io.github.carlos_emr.drugref2026.ca.dpd.fetch.DPDImport dpdImport = new io.github.carlos_emr.drugref2026.ca.dpd.fetch.DPDImport();
         long timeDataImport=0L;
         timeDataImport=dpdImport.doItDifferent();
         timeDataImport=(timeDataImport/1000)/60;
-        org.drugref.ca.dpd.fetch.TempNewGenericImport newGenericImport=new org.drugref.ca.dpd.fetch.TempNewGenericImport();
+        io.github.carlos_emr.drugref2026.ca.dpd.fetch.TempNewGenericImport newGenericImport=new io.github.carlos_emr.drugref2026.ca.dpd.fetch.TempNewGenericImport();
         long timeGenericImport=0L;
         timeGenericImport=newGenericImport.run();//in miliseconds
         timeGenericImport=(timeGenericImport/1000)/60;
