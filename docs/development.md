@@ -134,7 +134,7 @@ Hibernate SQL logging is enabled by default in `spring_config.xml`:
 
 ### Application Logging
 
-Log4j 2 is configured in `src/main/resources/log4j.xml`. The application uses `MiscUtils.getLogger()` which returns a Log4j Logger named after the calling class.
+Log4j 2 is configured in `src/main/resources/log4j2.xml`. The application uses `MiscUtils.getLogger()` which returns a Log4j Logger named after the calling class.
 
 ---
 
