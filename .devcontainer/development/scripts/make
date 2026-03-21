@@ -1,0 +1,183 @@
+#!/usr/bin/env sh
+set -e
+
+# Script to manage building and deploying Drugref 2026 to Tomcat.
+# Operations:
+#   install  - Build and deploy the WAR to Tomcat (incremental by default)
+#   clean    - Clean the project and remove the deployed webapp
+#   help     - Show this help
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Checks git state to determine whether skipping mvn clean is safe.
+# Sets _clean_reason to a human-readable explanation when a clean is needed.
+# Returns 0 if clean is needed, 1 if safe to skip.
+_clean_reason=""
+needs_clean_build() {
+  _clean_reason=""
+
+  # No compiled output → clean is a no-op anyway, full build needed
+  if [ ! -d "target/classes" ]; then
+    _clean_reason="no previous build found"
+    return 0
+  fi
+
+  # Not in a git repo → can't inspect history, play it safe
+  if ! git rev-parse --is-inside-work-tree > /dev/null 2>&1; then
+    _clean_reason="not inside a git repository"
+    return 0
+  fi
+
+  # Deleted Java source files → stale .class files would remain
+  if git status --porcelain | grep -qE '^D.*\.java$|^ D .*\.java$'; then
+    _clean_reason="Java files have been deleted"
+    return 0
+  fi
+
+  # Renamed Java source files → old .class stays alongside the new one
+  if git status --porcelain | grep -qE '^R.*\.java'; then
+    _clean_reason="Java files have been renamed"
+    return 0
+  fi
+
+  # pom.xml changed → dependency set may differ from last compile
+  if git status --porcelain | grep -q 'pom\.xml'; then
+    _clean_reason="pom.xml has uncommitted changes"
+    return 0
+  fi
+
+  # HEAD changed since last build → inspect inter-commit changes for danger
+  _build_marker="target/.last-build-head"
+  if [ -f "$_build_marker" ]; then
+    _last_head=$(cat "$_build_marker")
+    _current_head=$(git rev-parse HEAD 2>/dev/null)
+    if [ "$_last_head" != "$_current_head" ]; then
+      if ! git cat-file -e "${_last_head}^{commit}" 2>/dev/null; then
+        _clean_reason="last build commit no longer in history (rebased/force-pushed?)"
+        return 0
+      fi
+      if git diff --name-status "$_last_head" "$_current_head" 2>/dev/null \
+          | grep -qE '^[DR].*\.java$|pom\.xml'; then
+        _clean_reason="Java files or pom.xml changed between commits since last build"
+        return 0
+      fi
+    fi
+  fi
+
+  return 1  # Safe to skip clean
+}
+
+build_and_deploy() {
+  run_tests="$1"
+  clean_mode="${2:-auto}"
+
+  echo "Stopping server if running..."
+  "$SCRIPT_DIR/server" stop 2>/dev/null || true
+
+  if [ "$clean_mode" = "force" ]; then
+    clean_phase="clean"
+    echo "Build mode: full clean (--force-clean)"
+  elif [ "$clean_mode" = "skip" ]; then
+    clean_phase=""
+    echo "Build mode: incremental — skipping clean (--no-clean)"
+  else
+    if needs_clean_build; then
+      clean_phase="clean"
+      echo "Build mode: full clean ($_clean_reason)"
+    else
+      clean_phase=""
+      echo "Build mode: incremental — git state looks safe, skipping clean"
+    fi
+  fi
+
+  if [ "$run_tests" = true ]; then
+    mvn $clean_phase -DskipTests=true -T 1C package war:exploded
+    echo ""
+    echo "Running tests..."
+    mvn test
+  else
+    mvn $clean_phase -DskipTests=true -T 1C package war:exploded
+  fi
+
+  # Deploy exploded WAR to Tomcat webapps as /drugref2
+  pom_file="pom.xml"
+  version=$(grep -oPm 1 '<version>\K[^<]+' "$pom_file")
+  snapshot_src_dir="drugref2-$version"
+  snapshot_dest_dir="drugref2"
+
+  if [ -d "target/$snapshot_src_dir" ]; then
+    rm -rf "/usr/local/tomcat/webapps/$snapshot_dest_dir"
+    cp -a "target/$snapshot_src_dir" "/usr/local/tomcat/webapps/$snapshot_dest_dir"
+  fi
+
+  "$SCRIPT_DIR/server" start
+}
+
+print_help() {
+  echo "Usage: make [command] [flags]"
+  echo ""
+  echo "Commands:"
+  echo "  clean                   Clean the project and remove the deployed webapp."
+  echo "  install [options]       Build and deploy to Tomcat."
+  echo "    Options:"
+  echo "      --run-tests         Run tests after build"
+  echo "      --force-clean       Always run a full clean build"
+  echo "      --no-clean          Always skip clean"
+  echo "  help                    Display this help message."
+}
+
+run_tests=false
+clean_mode="auto"
+
+if [ $# -eq 0 ]; then
+  print_help
+  exit 1
+fi
+
+for arg in "$@"; do
+  case $arg in
+    clean)
+      mvn clean
+      rm -rf /usr/local/tomcat/webapps/drugref2
+      ;;
+    install)
+      shift
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --run-tests)
+            run_tests=true
+            shift
+            ;;
+          --no-clean)
+            clean_mode="skip"
+            shift
+            ;;
+          --force-clean)
+            clean_mode="force"
+            shift
+            ;;
+          *)
+            echo "Unknown flag: $1"
+            print_help
+            exit 1
+            ;;
+        esac
+      done
+      set +e
+      build_and_deploy "$run_tests" "$clean_mode"
+      build_rc=$?
+      set -e
+      if [ $build_rc -eq 0 ]; then
+        git rev-parse HEAD > "target/.last-build-head" 2>/dev/null || true
+      fi
+      exit $build_rc
+      ;;
+    help)
+      print_help
+      ;;
+    *)
+      print_help
+      exit 1
+      ;;
+  esac
+done
