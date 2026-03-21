@@ -1,4 +1,20 @@
-<%@page import="java.util.*,net.sf.json.*,org.drugref.ca.dpd.*"  %><%
+<%--
+  Copyright (c) 2026 CARLOS EMR Project Contributors. All Rights Reserved.
+
+  This program is free software: you can redistribute it and/or modify
+  it under the terms of the GNU Affero General Public License as
+  published by the Free Software Foundation, either version 3 of the
+  License, or (at your option) any later version.
+
+  This program is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+  GNU Affero General Public License for more details.
+
+  You should have received a copy of the GNU Affero General Public License
+  along with this program. If not, see <https://www.gnu.org/licenses/>.
+--%>
+<%@page import="java.util.*,io.github.carlos_emr.drugref2026.ca.dpd.*"  %><%
 Enumeration en = request.getParameterNames();
 while(en.hasMoreElements()){
     System.out.println(">"+en.nextElement());
@@ -15,27 +31,15 @@ Vector<Hashtable> vec=queryDao.listSearchElement3(searchStr);
 System.out.println("VEC "+vec.size());
 
 if ( request.getParameter("name") !=null ){
-//List list = new ArrayList();
     for (Hashtable h: vec){
-       //list.add( h.get("name") );
         Integer id = (Integer) h.get("id");
         System.out.println("querd "+queryDao.getSearchedDrug(id));
        out.write( h.get("name") +"\n");
     }
 }else{
-/* list.add( "JSON" );
- list.add( "1" );
- list.add( "2.0" );
- list.add( "true" );
- *
- */
 Hashtable d = new Hashtable();
 d.put("results",vec);
 response.setContentType("text/x-json");
-//JSONArray jsonArray = (JSONArray) JSONSerializer.toJSON( vec );
-
-JSONObject jsonArray = (JSONObject) JSONSerializer.toJSON( d );
-jsonArray.write(out);
-
+out.write(d.toString());
 }
 %>

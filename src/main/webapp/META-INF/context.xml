@@ -1,6 +1,21 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<Context antiJARLocking="true" path="/drugref2"/>
 <!--
-  <Resource auth="Container" driverClassName="org.postgresql.Driver" maxActive="20" maxIdle="10" maxWait="-1" name="jdbc/sample" password="sfhc96" type="javax.sql.DataSource" url="jdbc:postgresql://localhost:5432/drugref2" username="jackson"/>
-  <Resource auth="Container" driverClassName="org.postgresql.Driver" maxActive="20" maxIdle="10" maxWait="-1" name="drugref2" password="sfhc96" type="javax.sql.DataSource" url="jdbc:postgresql://localhost:5432/drugref2" username="jackson"/>
-</Context-->
+  Copyright (c) 2026 CARLOS EMR Project Contributors. All Rights Reserved.
+
+  This program is free software: you can redistribute it and/or modify
+  it under the terms of the GNU Affero General Public License as
+  published by the Free Software Foundation, either version 3 of the
+  License, or (at your option) any later version.
+
+  This program is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+  GNU Affero General Public License for more details.
+
+  You should have received a copy of the GNU Affero General Public License
+  along with this program. If not, see <https://www.gnu.org/licenses/>.
+-->
+<Context path="/drugref2">
+    <Valve className="org.apache.catalina.valves.RemoteAddrValve"
+           allow="127\.0\.0\.1|::1|0:0:0:0:0:0:0:1" />
+</Context>

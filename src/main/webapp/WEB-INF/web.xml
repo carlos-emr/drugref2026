@@ -1,29 +1,41 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<web-app version="2.5" xmlns="http://java.sun.com/xml/ns/javaee" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://java.sun.com/xml/ns/javaee http://java.sun.com/xml/ns/javaee/web-app_2_5.xsd">
+<!--
+  Copyright (c) 2026 CARLOS EMR Project Contributors. All Rights Reserved.
+
+  This program is free software: you can redistribute it and/or modify
+  it under the terms of the GNU Affero General Public License as
+  published by the Free Software Foundation, either version 3 of the
+  License, or (at your option) any later version.
+
+  This program is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+  GNU Affero General Public License for more details.
+
+  You should have received a copy of the GNU Affero General Public License
+  along with this program. If not, see <https://www.gnu.org/licenses/>.
+-->
+<web-app version="6.1"
+    xmlns="https://jakarta.ee/xml/ns/jakartaee"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="https://jakarta.ee/xml/ns/jakartaee https://jakarta.ee/xml/ns/jakartaee/web-app_6_1.xsd">
     <display-name>drugref2</display-name>
 
 
     <context-param>
         <param-name>contextConfigLocation</param-name>
         <param-value>classpath:spring_config.xml</param-value>
-        <!--param-value>/classes/spring_config.xml</param-value-->
     </context-param>
 
-	
+
 	<!-- Listeners -->
-    <!--listener>
-        <listener-class>org.springframework.web.context.ContextLoaderListener</listener-class>
-    </listener-->
     <listener>
-		<listener-class>org.drugref.util.StartUp</listener-class>
+		<listener-class>io.github.carlos_emr.drugref2026.util.StartUp</listener-class>
     </listener>
-    <!--listener>web
-        <listener-class>org.oscarehr.caisi_integrator.util.ContextStartupListener</listener-class>
-    </listener-->
 
     <servlet>
         <servlet-name>DrugrefService</servlet-name>
-        <servlet-class>org.drugref.DrugrefService</servlet-class>
+        <servlet-class>io.github.carlos_emr.drugref2026.DrugrefService</servlet-class>
     </servlet>
     <servlet-mapping>
         <servlet-name>DrugrefService</servlet-name>
@@ -38,11 +50,11 @@
     <welcome-file-list>
         <welcome-file>index.jsp</welcome-file>
     </welcome-file-list>
-    
+
     <context-param>
     <description>Global Properties file</description>
     <param-name>DRUGREF_PROPERTIES_PATH</param-name>
     <param-value>${user.home}/</param-value>
   </context-param>
-    
+
 </web-app>
