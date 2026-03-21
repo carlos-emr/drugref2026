@@ -519,11 +519,6 @@ public class Drugref {
           Query query = em.createQuery(queryStr);
           query.setParameter("din", din);
         	searchAtcResults = query.getResultList();
-        
-       try {
-            // Attempt to search with the named query
-          Query query = em.createQuery(queryStr);
-        	searchAtcResults = query.getResultList();
           for (CdTherapeuticClass resultAtc: searchAtcResults)answer.add(resultAtc.getTcAtcNumber());
 
 	     } catch (IllegalStateException e) {
