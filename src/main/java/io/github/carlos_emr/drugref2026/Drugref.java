@@ -513,7 +513,12 @@ public class Drugref {
        EntityManager em = JpaUtils.createEntityManager();
        List<CdTherapeuticClass> searchAtcResults;
         
-       String queryStr = "select cds from CdTherapeuticClass cds, CdDrugProduct cdp where cdp.drugIdentificationNumber = "+ din + " and cds.drugCode = cdp.drugCode";
+       String queryStr = "select cds from CdTherapeuticClass cds, CdDrugProduct cdp where cdp.drugIdentificationNumber = :din and cds.drugCode = cdp.drugCode";
+       try {
+            // Attempt to search with the named query
+          Query query = em.createQuery(queryStr);
+          query.setParameter("din", din);
+        	searchAtcResults = query.getResultList();
         
        try {
             // Attempt to search with the named query
