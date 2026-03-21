@@ -51,9 +51,6 @@ COPY ./scripts /scripts
 RUN dos2unix /scripts/* && chmod +x /scripts/*
 ENV PATH="/scripts:${PATH}"
 
-COPY ./scripts/startup.sh /startup.sh
-RUN dos2unix /startup.sh && chmod +x /startup.sh
-
 # Copy drugref2.properties (can be overridden by volume mount)
 COPY ./config/drugref2.properties /root/drugref2.properties
 
@@ -64,4 +61,4 @@ RUN mkdir -p /root/.m2 \
 
 EXPOSE 8080 8000
 
-CMD ["/startup.sh"]
+CMD ["tail", "-f", "/dev/null"]

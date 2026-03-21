@@ -5,7 +5,7 @@
     "workspaceFolder": "/workspace",
     "shutdownAction": "stopCompose",
     "dockerComposeOptions": ["--project-name", "drugref2026"],
-    "postCreateCommand": "cd /workspace && mvn -B dependency:go-offline dependency:sources dependency:resolve -Dclassifier=javadoc",
+    "postCreateCommand": "cd /workspace && mvn -B dependency:go-offline dependency:sources dependency:resolve -Dclassifier=javadoc && make install",
 
     "customizations": {
         "vscode": {
