@@ -15,7 +15,22 @@
   You should have received a copy of the GNU Affero General Public License
   along with this program. If not, see <https://www.gnu.org/licenses/>.
 -->
+<!--
+  Access to /drugref2 is restricted by IP via a RemoteCIDRValve. The default
+  preserves the historical localhost-only behavior. Operators running drugref2
+  in a container, behind a reverse proxy, or on a different host from its
+  consumer must widen the allow list at deploy time using a system property:
+
+    CATALINA_OPTS=-Ddrugref.allowedRemoteAddresses="127.0.0.1/32,::1/128,10.0.0.0/8"
+
+  The value is a comma-separated list of CIDR ranges (IPv4 and/or IPv6).
+  Tomcat 8.5+ resolves the ${name:default} placeholder at startup.
+
+  Alternatively, supply a sibling external context descriptor at
+  $CATALINA_BASE/conf/Catalina/localhost/drugref2.xml — Tomcat prefers it over
+  this in-WAR descriptor and ignores this file entirely.
+-->
 <Context path="/drugref2">
-    <Valve className="org.apache.catalina.valves.RemoteAddrValve"
-           allow="127\.0\.0\.1|::1|0:0:0:0:0:0:0:1" />
+    <Valve className="org.apache.catalina.valves.RemoteCIDRValve"
+           allow="${drugref.allowedRemoteAddresses:127.0.0.1/32,::1/128}" />
 </Context>
