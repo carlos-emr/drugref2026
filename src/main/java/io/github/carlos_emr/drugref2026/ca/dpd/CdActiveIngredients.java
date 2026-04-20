@@ -210,6 +210,9 @@ public class CdActiveIngredients implements Serializable {
     }
 
     @Override
+    /**
+     * Returns a string representation of the CdActiveIngredients object.
+     */
     public String toString() {
         return "io.github.carlos_emr.drugref2026.ca.dpd.CdActiveIngredients[id=" + id + "]";
     }

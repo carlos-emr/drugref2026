@@ -244,6 +244,9 @@ public class CdDrugProduct implements Serializable {
     }
 
     @Override
+    /**
+     * Returns a string representation of the CdDrugProduct object.
+     */
     public String toString() {
         return "io.github.carlos_emr.drugref2026.ca.dpd.CdDrugProduct[id=" + id + "]";
     }
