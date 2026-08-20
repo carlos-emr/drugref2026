@@ -414,22 +414,28 @@ public class DrugrefApi {
      */
     private Vector runquery(String query, Hashtable params) {
         Vector returnVal = new Vector();
-        //start to run query
+        // try/finally close: an unclosed EntityManager pins its pooled JDBC
+        // connection for the EM's lifetime (see the same fix across
+        // TablesDao and Holbrook).
         EntityManager em = JpaUtils.createEntityManager();
-        EntityTransaction tx = em.getTransaction();
-        tx.begin();
-        Query queryOne = em.createQuery(query);
-        Enumeration enm = params.keys();
-        while (enm.hasMoreElements()) {
-            String keyHashtable = (String) enm.nextElement();
-            queryOne.setParameter(keyHashtable, params.get(keyHashtable));
+        try {
+            EntityTransaction tx = em.getTransaction();
+            tx.begin();
+            Query queryOne = em.createQuery(query);
+            Enumeration enm = params.keys();
+            while (enm.hasMoreElements()) {
+                String keyHashtable = (String) enm.nextElement();
+                queryOne.setParameter(keyHashtable, params.get(keyHashtable));
+            }
+
+            List results = new ArrayList(queryOne.getResultList());
+            tx.commit();
+
+            Collections.copy(returnVal, results);
+            return returnVal;
+        } finally {
+            JpaUtils.close(em);
         }
-
-        List results = new ArrayList(queryOne.getResultList());
-        tx.commit();
-
-        Collections.copy(returnVal, results);
-        return returnVal;
     }
 
     /**

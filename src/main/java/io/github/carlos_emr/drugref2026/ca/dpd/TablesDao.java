@@ -335,11 +335,19 @@ public class TablesDao {
      * @return
      */
     public Integer getDrugIdFromDIN(String DIN) {
+    	// try/finally close: an unclosed EntityManager pins its pooled JDBC
+    	// connection for the EM's lifetime, and these lookup helpers are
+    	// called per row from the search paths — the leak exhausted the
+    	// 32-connection pool within two searches on a live deployment.
     	EntityManager em = JpaUtils.createEntityManager();
-    	Query drugProductByDIN = em.createNamedQuery("CdDrugProduct.findByDrugIdentificationNumber");
-    	drugProductByDIN.setParameter("drugIdentificationNumber", DIN);
-    	CdDrugProduct drugProduct = (CdDrugProduct) drugProductByDIN.getSingleResult();
-    	return drugProduct.getDrugCode();
+    	try {
+    		Query drugProductByDIN = em.createNamedQuery("CdDrugProduct.findByDrugIdentificationNumber");
+    		drugProductByDIN.setParameter("drugIdentificationNumber", DIN);
+    		CdDrugProduct drugProduct = (CdDrugProduct) drugProductByDIN.getSingleResult();
+    		return drugProduct.getDrugCode();
+    	} finally {
+    		JpaUtils.close(em);
+    	}
     }
     /**
      * Dennis Warren Colcamex Resources
@@ -348,10 +356,14 @@ public class TablesDao {
      */
     public String getDINFromDrugId(Integer drugId) {
     	EntityManager em = JpaUtils.createEntityManager();
-    	Query drugProductByDrugId = em.createNamedQuery("CdDrugProduct.findByDrugCode");
-    	drugProductByDrugId.setParameter("drugCode", drugId);
-    	CdDrugProduct drugProduct = (CdDrugProduct) drugProductByDrugId.getSingleResult();
-    	return drugProduct.getDrugIdentificationNumber();
+    	try {
+    		Query drugProductByDrugId = em.createNamedQuery("CdDrugProduct.findByDrugCode");
+    		drugProductByDrugId.setParameter("drugCode", drugId);
+    		CdDrugProduct drugProduct = (CdDrugProduct) drugProductByDrugId.getSingleResult();
+    		return drugProduct.getDrugIdentificationNumber();
+    	} finally {
+    		JpaUtils.close(em);
+    	}
     }
     
     /**
@@ -374,10 +386,14 @@ public class TablesDao {
      */
     public Integer getDrugpKeyFromDrugId(Integer drugId) {
     	EntityManager em = JpaUtils.createEntityManager();
-    	Query drugProductByDrugId = em.createNamedQuery("CdDrugProduct.findByDrugCode");
-    	drugProductByDrugId.setParameter("drugCode", drugId);
-    	CdDrugProduct drugProduct = (CdDrugProduct) drugProductByDrugId.getSingleResult();
-    	return drugProduct.getId();
+    	try {
+    		Query drugProductByDrugId = em.createNamedQuery("CdDrugProduct.findByDrugCode");
+    		drugProductByDrugId.setParameter("drugCode", drugId);
+    		CdDrugProduct drugProduct = (CdDrugProduct) drugProductByDrugId.getSingleResult();
+    		return drugProduct.getId();
+    	} finally {
+    		JpaUtils.close(em);
+    	}
     }
 
 
@@ -785,6 +801,9 @@ public class TablesDao {
      */
     public String getFirstDinInAIGroup(String aiGroupNo) {
     	String q1="select cdp from CdDrugProduct cdp where cdp.aiGroupNo = (:groupNo) order by cdp.lastUpdateDate";
+    	// This helper runs once per candidate row inside the search expansion,
+    	// so the missing close here alone consumed most of the connection pool
+    	// on a single list_search_element3 call.
     	EntityManager em = JpaUtils.createEntityManager();
          try{
              Query query=em.createQuery(q1);
@@ -795,6 +814,8 @@ public class TablesDao {
              }
          }catch(Exception e){
              e.printStackTrace();
+         }finally{
+             JpaUtils.close(em);
          }
          return null;
     }

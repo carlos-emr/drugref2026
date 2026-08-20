@@ -172,22 +172,22 @@ import io.github.carlos_emr.drugref2026.util.JpaUtils;
                     // is the "affecting" drug and the other is the "affected" drug
                     for (int j = 0; j < idrugs.size(); j++) {
                         String query = "select hi from Interactions hi where hi.affectingatc=:affecting and hi.affectedatc=:affected";
-                        //start to run query
-                 //       p("before query");
+                        // One EntityManager per drug PAIR, created inside a nested
+                        // loop: without the finally-close below, an interaction
+                        // check on an n-drug medication list leaked n*(n-1)
+                        // EntityManagers, each pinning a pooled JDBC connection
+                        // until GC — which exhausted the 32-connection pool and
+                        // took every later DrugRef call down with it.
                         EntityManager em = JpaUtils.createEntityManager();
                         EntityTransaction tx = em.getTransaction();
                         tx.begin();
                         Query queryOne = em.createQuery(query);
                         queryOne.setParameter("affecting", drug);
                         queryOne.setParameter("affected", idrugs.get(j));
-                      //  p("affecting",drug);
-                      //  p("affected",idrugs.get(j).toString());
-                      //  p("query",query);
 
                         List<Interactions> results = new ArrayList();
-                      try{ // p("before query");
+                      try{
                             results = queryOne.getResultList();                          
-                           // p("after query");
                             tx.commit();
 
                         // Vector results = this.runquery(query, params);
@@ -207,6 +207,11 @@ import io.github.carlos_emr.drugref2026.util.JpaUtils;
                         }
                         }catch(Exception e){
                             e.printStackTrace();                            
+                        }finally{
+                            // JpaUtils.close also rolls back the transaction
+                            // left active when getResultList throws before
+                            // tx.commit — em.close() alone would not.
+                            JpaUtils.close(em);
                         }
                     }
                 }
