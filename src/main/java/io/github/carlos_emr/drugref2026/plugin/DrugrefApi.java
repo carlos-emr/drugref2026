@@ -17,7 +17,6 @@
 package io.github.carlos_emr.drugref2026.plugin;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.Enumeration;
 import java.util.Hashtable;
 import java.util.List;
@@ -413,23 +412,32 @@ public class DrugrefApi {
      * @return a Vector of query results
      */
     private Vector runquery(String query, Hashtable params) {
-        Vector returnVal = new Vector();
-        //start to run query
+        // try/finally close: an unclosed EntityManager pins its pooled JDBC
+        // connection for the EM's lifetime (see the same fix across
+        // TablesDao and Holbrook).
         EntityManager em = JpaUtils.createEntityManager();
-        EntityTransaction tx = em.getTransaction();
-        tx.begin();
-        Query queryOne = em.createQuery(query);
-        Enumeration enm = params.keys();
-        while (enm.hasMoreElements()) {
-            String keyHashtable = (String) enm.nextElement();
-            queryOne.setParameter(keyHashtable, params.get(keyHashtable));
+        try {
+            EntityTransaction tx = em.getTransaction();
+            tx.begin();
+            Query queryOne = em.createQuery(query);
+            Enumeration enm = params.keys();
+            while (enm.hasMoreElements()) {
+                String keyHashtable = (String) enm.nextElement();
+                queryOne.setParameter(keyHashtable, params.get(keyHashtable));
+            }
+
+            List results = queryOne.getResultList();
+            tx.commit();
+
+            // new Vector(results), not Collections.copy into an empty Vector:
+            // Collections.copy requires the destination to already be at least
+            // as long as the source, so the old code threw
+            // IndexOutOfBoundsException the moment a query returned rows — a
+            // pre-existing bug this cleanup surfaced.
+            return new Vector(results);
+        } finally {
+            JpaUtils.close(em);
         }
-
-        List results = new ArrayList(queryOne.getResultList());
-        tx.commit();
-
-        Collections.copy(returnVal, results);
-        return returnVal;
     }
 
     /**
