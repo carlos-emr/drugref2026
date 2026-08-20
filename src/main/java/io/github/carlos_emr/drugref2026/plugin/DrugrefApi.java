@@ -17,7 +17,6 @@
 package io.github.carlos_emr.drugref2026.plugin;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.Enumeration;
 import java.util.Hashtable;
 import java.util.List;
@@ -413,7 +412,6 @@ public class DrugrefApi {
      * @return a Vector of query results
      */
     private Vector runquery(String query, Hashtable params) {
-        Vector returnVal = new Vector();
         // try/finally close: an unclosed EntityManager pins its pooled JDBC
         // connection for the EM's lifetime (see the same fix across
         // TablesDao and Holbrook).
@@ -428,11 +426,15 @@ public class DrugrefApi {
                 queryOne.setParameter(keyHashtable, params.get(keyHashtable));
             }
 
-            List results = new ArrayList(queryOne.getResultList());
+            List results = queryOne.getResultList();
             tx.commit();
 
-            Collections.copy(returnVal, results);
-            return returnVal;
+            // new Vector(results), not Collections.copy into an empty Vector:
+            // Collections.copy requires the destination to already be at least
+            // as long as the source, so the old code threw
+            // IndexOutOfBoundsException the moment a query returned rows — a
+            // pre-existing bug this cleanup surfaced.
+            return new Vector(results);
         } finally {
             JpaUtils.close(em);
         }

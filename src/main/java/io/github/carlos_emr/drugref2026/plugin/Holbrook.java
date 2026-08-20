@@ -179,14 +179,18 @@ import io.github.carlos_emr.drugref2026.util.JpaUtils;
                         // until GC — which exhausted the 32-connection pool and
                         // took every later DrugRef call down with it.
                         EntityManager em = JpaUtils.createEntityManager();
-                        EntityTransaction tx = em.getTransaction();
-                        tx.begin();
-                        Query queryOne = em.createQuery(query);
-                        queryOne.setParameter("affecting", drug);
-                        queryOne.setParameter("affected", idrugs.get(j));
-
+                        // The try opens immediately after the EM is created —
+                        // getTransaction/begin/createQuery/setParameter can all
+                        // throw (an invalid query, a dead pool), and any of
+                        // them outside the try would skip the finally and leak
+                        // the EM after all.
                         List<Interactions> results = new ArrayList();
                       try{
+                            EntityTransaction tx = em.getTransaction();
+                            tx.begin();
+                            Query queryOne = em.createQuery(query);
+                            queryOne.setParameter("affecting", drug);
+                            queryOne.setParameter("affected", idrugs.get(j));
                             results = queryOne.getResultList();                          
                             tx.commit();
 
