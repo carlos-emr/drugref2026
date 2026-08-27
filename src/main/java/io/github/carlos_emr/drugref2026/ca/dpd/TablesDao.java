@@ -916,7 +916,12 @@ public class TablesDao {
             //String queryStr = "select cds.id, cds.category, cds.name from CdDrugSearch cds where ";
                     String queryStr = "select cds from CdDrugSearch cds where (";
                     for (int i = 0; i < strArray.length; i++) {
-                        queryStr = queryStr + "upper(cds.name) like " + "'" + ((rightOnly)?"":"%") + strArray[i].toUpperCase() + "%" + "'";
+                        // In rightOnly mode only the FIRST token is anchored to the start of the
+                        // name; later tokens (strengths, forms) must match anywhere, otherwise a
+                        // multi-word query like "RAMIP 10" becomes unsatisfiable (no name can
+                        // start with both "RAMIP" and "10").
+                        boolean anchorToStart = rightOnly && i == 0;
+                        queryStr = queryStr + "upper(cds.name) like " + "'" + (anchorToStart ? "" : "%") + strArray[i].toUpperCase() + "%" + "'";
                         if (i < strArray.length - 1) {
                             queryStr = queryStr + " and ";
                         }
