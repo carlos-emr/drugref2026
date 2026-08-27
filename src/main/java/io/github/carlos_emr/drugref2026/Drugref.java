@@ -500,13 +500,12 @@ public class Drugref {
     }
     
    /**
-     * Get a set of drugs by their DIN number.
-     * 
-     * @param din
-     *            the DIN number to search on.
-     * @return A Vector containing the result of the query.
+    /**
+     * Retrieves a set of therapeutic class ATC numbers by their DIN.
+     *
+     * @param din the DIN number to search on.
+     * @return a Vector containing the ATC numbers.
      */
-    @SuppressWarnings("unchecked")
     public Vector<String> get_atcs_by_din(String din) {
 
        Vector<String> answer = new Vector<String>();
