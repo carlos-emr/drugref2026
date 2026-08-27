@@ -840,16 +840,20 @@ public class TablesDao {
      * non-prefixed names.</p>
      *
      * @param str the user's search input string
-     * @param rightOnly if true, only matches from the beginning of the name (no left wildcard);
-     *                  if false, matches anywhere in the name (left and right wildcards)
+     * @param rightOnly if true, matches from the beginning of the name (no left wildcard) — in
+     *                  Phase 2 only the first keyword is prefix-anchored and later keywords
+     *                  (strengths, forms) may match anywhere; if false, all keywords match
+     *                  anywhere in the name (left and right wildcards)
      * @return a Vector of Hashtable results with keys "name", "category", "id", "isInactive"
      */
     public Vector listSearchElement4(String str, boolean rightOnly){
         //logger.debug("before create em in listSearchElement4");
-        // Normalize the search input: uppercase, strip commas and apostrophes
+        // Normalize the search input: uppercase, strip commas and apostrophes, trim
+        // (leading whitespace would defeat the Phase-1 prefix match in rightOnly mode)
         String matchKey=str.toUpperCase();
         matchKey=matchKey.replace(",", " ");
         matchKey=matchKey.replace("'", "");
+        matchKey=matchKey.trim();
         List<CdDrugSearch> results1=new ArrayList(); // Phase 1: direct match results
         List<CdDrugSearch> results2=new ArrayList(); // Phase 2: multi-keyword match results
         int max_rows_for_result2=0;
@@ -907,7 +911,11 @@ public class TablesDao {
                     // Splits the original search string into tokens and requires all to match.
                     str = str.replace(",", " ");
                     str = str.replace("'", "");
-                    String[] strArray = str.split("\\s+");
+                    // Trim before splitting: leading whitespace (typed, or left by the comma
+                    // replacement above) would otherwise yield an empty first token, and in
+                    // rightOnly mode the start-of-name anchor would land on that empty token
+                    // instead of the first real keyword.
+                    String[] strArray = str.trim().split("\\s+");
 
                 //    for (int i = 0; i < strArray.length; i++) {
                 //        logger.debug(strArray[i]);
@@ -916,7 +924,12 @@ public class TablesDao {
             //String queryStr = "select cds.id, cds.category, cds.name from CdDrugSearch cds where ";
                     String queryStr = "select cds from CdDrugSearch cds where (";
                     for (int i = 0; i < strArray.length; i++) {
-                        queryStr = queryStr + "upper(cds.name) like " + "'" + ((rightOnly)?"":"%") + strArray[i].toUpperCase() + "%" + "'";
+                        // In rightOnly mode only the FIRST token is anchored to the start of the
+                        // name; later tokens (strengths, forms) must match anywhere, otherwise a
+                        // multi-word query like "RAMIP 10" becomes unsatisfiable (no name can
+                        // start with both "RAMIP" and "10").
+                        boolean anchorToStart = rightOnly && i == 0;
+                        queryStr = queryStr + "upper(cds.name) like " + "'" + (anchorToStart ? "" : "%") + strArray[i].toUpperCase() + "%" + "'";
                         if (i < strArray.length - 1) {
                             queryStr = queryStr + " and ";
                         }
