@@ -840,8 +840,10 @@ public class TablesDao {
      * non-prefixed names.</p>
      *
      * @param str the user's search input string
-     * @param rightOnly if true, only matches from the beginning of the name (no left wildcard);
-     *                  if false, matches anywhere in the name (left and right wildcards)
+     * @param rightOnly if true, matches from the beginning of the name (no left wildcard) — in
+     *                  Phase 2 only the first keyword is prefix-anchored and later keywords
+     *                  (strengths, forms) may match anywhere; if false, all keywords match
+     *                  anywhere in the name (left and right wildcards)
      * @return a Vector of Hashtable results with keys "name", "category", "id", "isInactive"
      */
     public Vector listSearchElement4(String str, boolean rightOnly){
