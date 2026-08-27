@@ -45,28 +45,16 @@ public class DrugrefService extends HttpServlet {
     private static Logger logger = MiscUtils.getLogger();
 
     /**
-     * Initializes the servlet by creating a {@link SimpleXmlRpcServer} backed by
-     * a new {@link Drugref} instance. Called once by the servlet container on first load.
-     *
-     * @param config the servlet configuration provided by the container
-     * @throws ServletException if initialization fails
+     * Initializes the servlet by creating a {@link SimpleXmlRpcServer} with a new {@link Drugref} instance.
      */
     public void init(ServletConfig config) throws ServletException {
         logger.debug("HERE-INIT");
         xmlrpc = new SimpleXmlRpcServer(new Drugref());
     }
     /**
-     * Handles the HTTP POST method by delegating to the XML-RPC server.
-     *
-     * <p>Reads the XML-RPC request from the input stream, invokes the appropriate
-     * method on the {@link Drugref} handler, and writes the XML-RPC response.
-     *
-     * @param request servlet request containing the XML-RPC payload
-     * @param response servlet response where the XML-RPC result is written
-     * @throws ServletException if a servlet-specific error occurs
-     * @throws IOException if an I/O error occurs during request/response processing
+    /**
+     * Handles the HTTP POST method by executing the XML-RPC request.
      */
-    @Override
     protected void doPost(HttpServletRequest request, HttpServletResponse response)
             throws ServletException, IOException {
         logger.debug("HERE-POST");

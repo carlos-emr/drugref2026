@@ -258,6 +258,9 @@ public class CdCompanies implements Serializable {
     }
 
     @Override
+    /**
+     * Returns a string representation of the CdCompanies object.
+     */
     public String toString() {
         return "io.github.carlos_emr.drugref2026.ca.dpd.CdCompanies[id=" + id + "]";
     }
