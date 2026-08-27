@@ -846,10 +846,12 @@ public class TablesDao {
      */
     public Vector listSearchElement4(String str, boolean rightOnly){
         //logger.debug("before create em in listSearchElement4");
-        // Normalize the search input: uppercase, strip commas and apostrophes
+        // Normalize the search input: uppercase, strip commas and apostrophes, trim
+        // (leading whitespace would defeat the Phase-1 prefix match in rightOnly mode)
         String matchKey=str.toUpperCase();
         matchKey=matchKey.replace(",", " ");
         matchKey=matchKey.replace("'", "");
+        matchKey=matchKey.trim();
         List<CdDrugSearch> results1=new ArrayList(); // Phase 1: direct match results
         List<CdDrugSearch> results2=new ArrayList(); // Phase 2: multi-keyword match results
         int max_rows_for_result2=0;
@@ -907,7 +909,11 @@ public class TablesDao {
                     // Splits the original search string into tokens and requires all to match.
                     str = str.replace(",", " ");
                     str = str.replace("'", "");
-                    String[] strArray = str.split("\\s+");
+                    // Trim before splitting: leading whitespace (typed, or left by the comma
+                    // replacement above) would otherwise yield an empty first token, and in
+                    // rightOnly mode the start-of-name anchor would land on that empty token
+                    // instead of the first real keyword.
+                    String[] strArray = str.trim().split("\\s+");
 
                 //    for (int i = 0; i < strArray.length; i++) {
                 //        logger.debug(strArray[i]);
