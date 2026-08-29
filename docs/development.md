@@ -157,14 +157,12 @@ Current test coverage includes:
 
 ### Manual Testing
 
-**JSP test pages** (accessible in browser):
-
-| Page | URL | Purpose |
-|------|-----|---------|
-| `index.jsp` | `/drugref2/` | Search UI with XML-RPC proxy |
-| `test4.jsp` | `/drugref2/test4.jsp?name=aspirin` | Drug search returning JSON/text |
-| `Update.jsp` | `/drugref2/Update.jsp` | Trigger data import, view results |
-| `addDescriptorAndStrength.jsp` | `/drugref2/addDescriptorAndStrength.jsp` | Run post-import enhancements |
+**No browser test pages.** DrugRef serves no JSPs. The former `index.jsp`,
+`test.jsp`, `test4.jsp`, `Update.jsp` and `addDescriptorAndStrength.jsp` were
+removed: they were unauthenticated, and `Update.jsp` /
+`addDescriptorAndStrength.jsp` performed destructive database rewrites on a plain
+GET while `index.jsp` / `test4.jsp` reflected a request parameter unencoded. Use
+the XML-RPC calls below for manual testing.
 
 **XML-RPC testing** (using curl):
 ```sh
@@ -207,10 +205,8 @@ drugref2026/
         interactions-holbrook.txt    -- Bundled drug interaction data
         META-INF/persistence.xml     -- JPA persistence unit
       webapp/
-        WEB-INF/web.xml              -- Servlet configuration
-        index.jsp                    -- Search UI
-        Update.jsp                   -- Data import trigger
-        test4.jsp                    -- Search test page
+        WEB-INF/web.xml              -- Servlet configuration (no JSPs: the
+                                     --   service is XML-RPC only)
     test/
       java/io/github/carlos_emr/drugref2026/
         ...                          -- Test source code

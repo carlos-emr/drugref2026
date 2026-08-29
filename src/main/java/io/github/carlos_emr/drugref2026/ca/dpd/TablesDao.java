@@ -1706,13 +1706,22 @@ public class TablesDao {
         }
         logger.debug(q1);
         Vector vec = new Vector();
-        Query queryOne = em.createQuery(q1);
-        for (int i = 0; i < Dclass.size(); i++) {
-            queryOne.setParameter("id" + i, Integer.valueOf(String.valueOf(Dclass.get(i))));
-        }
-        List<CdDrugSearch> listOne = queryOne.getResultList();
-        if (listOne.size() > 0) {
-            try {
+        // The EntityManager is closed in the finally below for EVERY exit path.
+        // Previously createQuery/getResultList sat outside any try and the only
+        // close was reachable when listOne was non-empty, so an empty result —
+        // or a query that threw — leaked a pooled JDBC connection per call, an
+        // unauthenticated route to exhausting the pool. Binding the ids as
+        // parameters widened the set of inputs that throw here (a non-numeric id
+        // now fails fast instead of building invalid HQL), which makes closing
+        // properly a prerequisite rather than a nicety. trim() keeps
+        // whitespace-padded numerics working as they did before parameterizing.
+        try {
+            Query queryOne = em.createQuery(q1);
+            for (int i = 0; i < Dclass.size(); i++) {
+                queryOne.setParameter("id" + i, Integer.valueOf(String.valueOf(Dclass.get(i)).trim()));
+            }
+            List<CdDrugSearch> listOne = queryOne.getResultList();
+            if (listOne.size() > 0) {
                 for (int i = 0; i < listOne.size(); i++) {
                     Integer id = listOne.get(i).getId();
                     Query queryTwo = em.createQuery("select cds2 from CdDrugSearch cds2 where cds2.drugCode in (select tc.tcAhfsNumber from   CdTherapeuticClass tc where tc.drugCode = (:cdIntDrugCode)) order by cds2.id");
@@ -1726,20 +1735,22 @@ public class TablesDao {
                         vec.add(ha);
                     }
                 }
-            } catch (Exception e) {
-                e.printStackTrace();
-            } finally {
-                JpaUtils.close(em);
+                return vec;
             }
-            return vec;
-        } else {
-            Vector defaultVec = new Vector();
-            Hashtable ha = new Hashtable();
-            ha.put("pharm_cd_form_code", "");
-            ha.put("pharmaceutical_cd_form", "None found");
-            defaultVec.addElement(ha);
-            return defaultVec;
+        } catch (Exception e) {
+            // Consistent with the sibling lookups in this DAO: a failed query
+            // degrades to the "None found" shape rather than propagating an
+            // XML-RPC fault (and, before this, leaking the connection with it).
+            e.printStackTrace();
+        } finally {
+            JpaUtils.close(em);
         }
+        Vector defaultVec = new Vector();
+        Hashtable ha = new Hashtable();
+        ha.put("pharm_cd_form_code", "");
+        ha.put("pharmaceutical_cd_form", "None found");
+        defaultVec.addElement(ha);
+        return defaultVec;
     }
 
     /**
@@ -2311,7 +2322,7 @@ public class TablesDao {
                     queryAHFSNumber.setParameter("aDesc", aDesc);
                     List<String> list = (List) queryAHFSNumber.getResultList();
                     for(String s:list) {
-                    	Query query = em.createQuery("select distinct tc.tcAtcNumber from CdTherapeuticClass tc where tc.tcAhfsNumber like :aDesc");
+                        Query query = em.createQuery("select distinct tc.tcAtcNumber from CdTherapeuticClass tc where tc.tcAhfsNumber like :aDesc");
                         query.setParameter("aDesc", s + "%");
                         List<String> resultTcAtcNumber = query.getResultList();
                         vec.addAll(resultTcAtcNumber);

@@ -21,8 +21,8 @@ In the DevContainer, the Dockerfile copies a properties file to `/root/drugref2.
 | Property | Description | Default |
 |----------|-------------|---------|
 | `db_url` | JDBC connection URL | `jdbc:mysql://127.0.0.1:3306/drugref` |
-| `db_user` | Database username | `root` |
-| `db_password` | Database password | `yessum` |
+| `db_user` | Database username | `drugref` |
+| `db_password` | Database password | *(empty)* |
 | `db_driver` | JDBC driver class | `com.mysql.cj.jdbc.Driver` |
 | `sort_down_mfg_tagged_generics` | Sort manufacturer-tagged generics lower in search | `false` |
 | `interaction_base_url` | Medi-Span data server URL | `https://download.oscar-emr.com/ws/rs/accounts` |
@@ -165,7 +165,8 @@ Initializes properties and Medi-Span interaction checker on deployment.
 ### Session
 
 - Session timeout: 30 minutes
-- Welcome file: `index.jsp`
+- No welcome file: DrugRef is a machine-to-machine XML-RPC service and serves no
+  browser pages. A GET of the context root returns 404.
 
 ---
 
