@@ -29,8 +29,6 @@ Includes interactions from the Liverpool Paxlovid interaction tables and RxNorm 
 
 ## Triggering an Update
 
-There are two ways to trigger a data update:
-
 ### XML-RPC: `updateDB()`
 Call the `updateDB()` method via XML-RPC. Returns `"running"` if started, `"updating"` if already in progress. The import runs in a background thread (`RxUpdateDBWorker`).
 
