@@ -39,10 +39,10 @@ Every client interaction follows this path:
 |                         Tomcat 11                                 |
 |                                                                   |
 |  +--------------------+     +-------------------------------+     |
-|  | web.xml            |     | JSP Pages                     |     |
-|  | - StartUp listener |     | - index.jsp (search UI)       |     |
-|  | - DrugrefService   |     | - Update.jsp (trigger import) |     |
-|  +--------+-----------+     | - test4.jsp (search test)     |     |
+|  | web.xml            |     | (no JSP pages — DrugRef is    |     |
+|  | - StartUp listener |     |  a machine-to-machine XML-RPC |     |
+|  | - DrugrefService   |     |  service and serves no        |     |
+|  +--------+-----------+     |  browser pages)               |     |
 |           |                 +-------------------------------+     |
 |           v                                                       |
 |  +--------------------+                                           |
@@ -137,7 +137,7 @@ It performs pairwise comparisons across all drugs in a list and returns interact
 
 | Thread | Purpose | Source |
 |--------|---------|--------|
-| Tomcat worker threads | Handle HTTP requests to `/DrugrefService` and JSP pages | Tomcat thread pool |
+| Tomcat worker threads | Handle HTTP requests to `/DrugrefService` | Tomcat thread pool |
 | `RxUpdateDBWorker` | Background DPD import (launched by `Drugref.updateDB()`) | `new Thread().start()` |
 | `drugref-task-*` | Medi-Span data loading and status polling | Spring `ThreadPoolTaskExecutor` (2-4 threads) |
 | `InteractionsCheckerFactory` scheduler | Periodic Medi-Span status checks | `ScheduledExecutorService` |

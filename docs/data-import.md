@@ -29,13 +29,13 @@ Includes interactions from the Liverpool Paxlovid interaction tables and RxNorm 
 
 ## Triggering an Update
 
-There are two ways to trigger a data update:
-
-### 1. XML-RPC: `updateDB()`
+### XML-RPC: `updateDB()`
 Call the `updateDB()` method via XML-RPC. Returns `"running"` if started, `"updating"` if already in progress. The import runs in a background thread (`RxUpdateDBWorker`).
 
-### 2. Update.jsp
-Navigate to `/drugref2/Update.jsp` in a browser. This triggers the import directly and displays results (row counts, timing) in the browser.
+This is the only supported trigger. CARLOS uses it (`RxDrugRef.updateDB()`, reached
+from **Administration → Update DrugRef Database**). The former `Update.jsp` browser
+page has been removed: it ran the same import inline on an unauthenticated GET, with
+no CSRF protection and no in-progress guard.
 
 ## Import Pipeline
 

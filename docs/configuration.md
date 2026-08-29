@@ -21,14 +21,28 @@ In the DevContainer, the Dockerfile copies a properties file to `/root/drugref2.
 | Property | Description | Default |
 |----------|-------------|---------|
 | `db_url` | JDBC connection URL | `jdbc:mysql://127.0.0.1:3306/drugref` |
-| `db_user` | Database username | `root` |
-| `db_password` | Database password | `yessum` |
+| `db_user` | Database username | `drugref` |
+| `db_password` | Database password | *(empty)* |
 | `db_driver` | JDBC driver class | `com.mysql.cj.jdbc.Driver` |
 | `sort_down_mfg_tagged_generics` | Sort manufacturer-tagged generics lower in search | `false` |
 | `interaction_base_url` | Medi-Span data server URL | `https://download.oscar-emr.com/ws/rs/accounts` |
 | `scheduled_timer` | Medi-Span status poll interval (ms) | `300000` (5 minutes) |
 | `licence_key` | Medi-Span license key | (none) |
 | `DPD_BASE_URL` | Health Canada DPD download URL | `https://www.canada.ca/content/dam/hc-sc/documents/services/drug-product-database` |
+
+> **The bundled `db_user` / `db_password` defaults are non-functional placeholders —
+> supplying real credentials in the external overlay is REQUIRED.** They name an
+> unprivileged account with an empty password, so a deployment without an overlay
+> fails to connect rather than falling back to a working database login. That is
+> deliberate: the bundled file ships inside the WAR and is published in this source
+> tree, so any real credential in it would be a published credential. Earlier
+> releases defaulted to the database superuser `root` with a known password, which
+> meant a missing or unreadable overlay silently connected as `root`.
+>
+> Grant the account only what DrugRef needs on its own schema, and set `db_url`,
+> `db_user` and `db_password` in `${user.home}/drugref2.properties` (see **Loading
+> Order** above). In the CARLOS Debian deployment the `carlos-emr-drugref` package
+> renders this file for you.
 
 ### Database Support
 
@@ -165,7 +179,8 @@ Initializes properties and Medi-Span interaction checker on deployment.
 ### Session
 
 - Session timeout: 30 minutes
-- Welcome file: `index.jsp`
+- No welcome file: DrugRef is a machine-to-machine XML-RPC service and serves no
+  browser pages. A GET of the context root returns 404.
 
 ---
 
