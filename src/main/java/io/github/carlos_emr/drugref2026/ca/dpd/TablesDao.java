@@ -651,10 +651,10 @@ public class TablesDao {
             logger.debug("after txt definition");
             //tx.begin();
             //String queryStr = "select distinct cai.ingredient,cai.strength, cai.strengthUnit,cdf.pharmaceuticalCdForm   from CdDrugProduct cdp, CdForm cdf, CdActiveIngredients cai where cdp.drugCode = cai.drugCode and cdp.drugCode = cdf.drugCode and  cdp.aiGroupNo LIKE '"+ aiGroup + "%' order by cai.strength";//(:aiGroup) ";
-            String queryStr = "select cds from CdDrugSearch cds where cds.category in (18,19) and cds.drugCode like '" + aiGroup + "%' ";
+            String queryStr = "select cds from CdDrugSearch cds where cds.category in (18,19) and cds.drugCode like :aiGroup ";
 
             Query query = em.createQuery(queryStr);
-            //query.setParameter("aiGroup", aiGroup+"%");
+            query.setParameter("aiGroup", aiGroup + "%");
 
             logger.debug("before getListAICodes query");
 
@@ -1369,7 +1369,9 @@ public class TablesDao {
             //tx.begin();
 
 
-            CdDrugSearch cdsResult = (CdDrugSearch) em.createQuery("select cds from CdDrugSearch cds where cds.id = " + drugID).getSingleResult();
+            Query brandQuery = em.createQuery("select cds from CdDrugSearch cds where cds.id = :id");
+            brandQuery.setParameter("id", Integer.valueOf(drugID.trim()));
+            CdDrugSearch cdsResult = (CdDrugSearch) brandQuery.getSingleResult();
 
 
             //logger.debug(cdsResult.getDrugCode() + " -- " + cdsResult.getName() + " :: " + cdsResult.getCategory());
@@ -1694,7 +1696,7 @@ public class TablesDao {
 
         String q1 = "select cds from  CdDrugSearch cds where ";
         for (int i = 0; i < Dclass.size(); i++) {
-            q1 = q1 + " cds.id = " + Dclass.get(i);
+            q1 = q1 + " cds.id = :id" + i;
             if (i < Dclass.size() - 1) {
                 q1 = q1 + " or ";
             }
@@ -1702,6 +1704,9 @@ public class TablesDao {
         logger.debug(q1);
         Vector vec = new Vector();
         Query queryOne = em.createQuery(q1);
+        for (int i = 0; i < Dclass.size(); i++) {
+            queryOne.setParameter("id" + i, Integer.valueOf(String.valueOf(Dclass.get(i))));
+        }
         List<CdDrugSearch> listOne = queryOne.getResultList();
         if (listOne.size() > 0) {
             try {
@@ -1806,9 +1811,9 @@ public class TablesDao {
 
                          */
 
-                        Query query = em.createQuery("select tc.tcAtcNumber from CdTherapeuticClass tc where tc.tcAtcNumber= (:atcCode) and tc.tcAhfsNumber like '" + s + "%'");
+                        Query query = em.createQuery("select tc.tcAtcNumber from CdTherapeuticClass tc where tc.tcAtcNumber= (:atcCode) and tc.tcAhfsNumber like :aDesc");
                         query.setParameter("atcCode", atcCode);
-                        //query.setParameter("aDesc", s+"%");
+                        query.setParameter("aDesc", s + "%");
                         List resultTcAtcNumber = query.getResultList();
                         if (resultTcAtcNumber.size() > 0) {
                             logger.debug(atcCode + " is in this2 Allergy group " + aDesc);
