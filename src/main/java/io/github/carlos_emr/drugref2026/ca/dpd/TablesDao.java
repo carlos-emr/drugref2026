@@ -611,9 +611,9 @@ public class TablesDao {
             //EntityTransaction tx = em.getTransaction();
             logger.debug("after txt definition");
             //tx.begin();
-            String queryStr = "select distinct cai.ingredient,cai.strength, cai.strengthUnit,cdf.pharmaceuticalCdForm   from CdDrugProduct cdp, CdForm cdf, CdActiveIngredients cai where cdp.drugCode = cai.drugCode and cdp.drugCode = cdf.drugCode and  cdp.aiGroupNo LIKE '" + aiGroup + "%' order by cai.strength";//(:aiGroup) ";
+            String queryStr = "select distinct cai.ingredient,cai.strength, cai.strengthUnit,cdf.pharmaceuticalCdForm   from CdDrugProduct cdp, CdForm cdf, CdActiveIngredients cai where cdp.drugCode = cai.drugCode and cdp.drugCode = cdf.drugCode and  cdp.aiGroupNo LIKE :aiGroup order by cai.strength";
             Query query = em.createQuery(queryStr);
-            //query.setParameter("aiGroup", aiGroup+"%");
+            query.setParameter("aiGroup", aiGroup+"%");
 
             logger.debug("before getListAICodes query");
 
@@ -1489,7 +1489,7 @@ public class TablesDao {
         queryStr = queryStr + "(";
 
         for (int i = 0; i < cat.size(); i++) {
-            queryStr = queryStr + "cds.category= " + cat.get(i);
+            queryStr = queryStr + "cds.category= :cat" + i;
             if (i < (cat.size() - 1)) {
                 queryStr = queryStr + " or ";
             }
@@ -1503,6 +1503,9 @@ public class TablesDao {
             //EntityTransaction tx = em.getTransaction();
             //tx.begin();
             Query query = em.createQuery(queryStr);
+            for (int i = 0; i < cat.size(); i++) {
+                query.setParameter("cat" + i, Integer.valueOf(String.valueOf(cat.get(i))));
+            }
             //@SuppressWarnings("unchecked")
             results = query.getResultList();
             //tx.commit();
@@ -2308,7 +2311,8 @@ public class TablesDao {
                     queryAHFSNumber.setParameter("aDesc", aDesc);
                     List<String> list = (List) queryAHFSNumber.getResultList();
                     for(String s:list) {
-                    	Query query = em.createQuery("select distinct tc.tcAtcNumber from CdTherapeuticClass tc where tc.tcAhfsNumber like '" + s + "%'");                       
+                    	Query query = em.createQuery("select distinct tc.tcAtcNumber from CdTherapeuticClass tc where tc.tcAhfsNumber like :aDesc");
+                        query.setParameter("aDesc", s + "%");
                         List<String> resultTcAtcNumber = query.getResultList();
                         vec.addAll(resultTcAtcNumber);
                     }
