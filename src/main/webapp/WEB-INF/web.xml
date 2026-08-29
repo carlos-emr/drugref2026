@@ -47,9 +47,11 @@
             30
         </session-timeout>
     </session-config>
-    <welcome-file-list>
-        <welcome-file>index.jsp</welcome-file>
-    </welcome-file-list>
+    <!-- No welcome file: DrugRef is a machine-to-machine XML-RPC service
+         (DrugrefService), not a browser application. The former index.jsp was a
+         demo search page that reflected its `searchVal` parameter unencoded (a
+         reflected-XSS sink) and invoked the drug-search HQL; it and the other
+         demo/test JSPs have been removed so the WAR exposes only the service. -->
 
     <context-param>
     <description>Global Properties file</description>
