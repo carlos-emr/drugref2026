@@ -64,7 +64,7 @@ public class CdCompanies implements Serializable {
     private String mfrCode;
     @Column(name = "company_code")
     private Integer companyCode;
-    @Column(name = "company_name", length = 80)
+    @Column(name = "company_name", length = 120)
     private String companyName;
     @Column(name = "company_type", length = 40)
     private String companyType;
@@ -78,9 +78,9 @@ public class CdCompanies implements Serializable {
     private String addressOther;
     @Column(name = "suite_number", length = 20)
     private String suiteNumber;
-    @Column(name = "street_name", length = 80)
+    @Column(name = "street_name", length = 120)
     private String streetName;
-    @Column(name = "city_name", length = 60)
+    @Column(name = "city_name", length = 80)
     private String cityName;
     @Column(name = "province", length = 40)
     private String province;

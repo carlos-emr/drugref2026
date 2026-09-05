@@ -63,9 +63,9 @@ public class CdPackaging implements Serializable {
     private String packageSizeUnit;
     @Column(name = "package_type", length = 40)
     private String packageType;
-    @Column(name = "package_size", length = 5)
+    @Column(name = "package_size", length = 20)
     private String packageSize;
-    @Column(name = "product_inforation", length = 80)
+    @Column(name = "product_inforation", length = 255)
     private String productInforation;
     @Id
     @GeneratedValue(strategy=GenerationType.IDENTITY)

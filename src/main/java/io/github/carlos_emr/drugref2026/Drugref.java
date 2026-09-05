@@ -37,6 +37,7 @@ import io.github.carlos_emr.drugref2026.ca.dpd.History;
 import io.github.carlos_emr.drugref2026.util.JpaUtils;
 import io.github.carlos_emr.drugref2026.util.RxUpdateDBWorker;
 import io.github.carlos_emr.drugref2026.util.SpringUtils;
+import io.github.carlos_emr.drugref2026.util.UpdateStatus;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.Logger;
 import io.github.carlos_emr.drugref2026.util.MiscUtils;
@@ -159,18 +160,52 @@ public class Drugref {
             if(UPDATE_DB){
                 return "updating";
             }else{
+                return queryLastUpdateTime();
+            }
+        }
 
-                EntityManager em = JpaUtils.createEntityManager();
+        /** The newest {@code history} row's timestamp, or {@code null} when there is none. */
+        private String queryLastUpdateTime() {
+            EntityManager em = JpaUtils.createEntityManager();
+            try {
                 String queryStr="select h from History h where h.id=(select max(h2.id) from History h2)";
                 Query query = em.createQuery(queryStr);
                 List<History> results = query.getResultList();
-                JpaUtils.close(em);
                 if(results!=null && results.size()>0){
                     return results.get(0).getDateTime().toString();
                 }
-                else
-                    return null;
+                return null;
+            } finally {
+                JpaUtils.close(em);
             }
+        }
+
+        /**
+         * Reports the outcome of the most recent database update attempt in this JVM.
+         *
+         * <p>{@link #getLastUpdateTime()} can only say "updating" or give a date; it
+         * cannot say that the last attempt failed, or why. This struct can. Keys:
+         * <ul>
+         *   <li>{@code state}: {@code IDLE}, {@code RUNNING}, {@code SUCCEEDED} or {@code FAILED}</li>
+         *   <li>{@code step}: the pipeline step in progress, or the one that failed</li>
+         *   <li>{@code message}: a summary on success, the reason on failure</li>
+         *   <li>{@code startedAt}, {@code finishedAt}: {@code yyyy-MM-dd HH:mm:ss}, or empty</li>
+         *   <li>{@code lastUpdate}: the newest history timestamp, or empty; never "updating"</li>
+         * </ul>
+         * All values are strings.
+         *
+         * @return the status struct
+         */
+        public Hashtable<String,Object> getUpdateStatus(){
+            Hashtable<String,Object> status = UpdateStatus.get().toStruct();
+            String lastUpdate = null;
+            try {
+                lastUpdate = queryLastUpdateTime();
+            } catch (RuntimeException e) {
+                logger.warn("could not read the update history", e);
+            }
+            status.put("lastUpdate", lastUpdate == null ? "" : lastUpdate);
+            return status;
         }
         
         /**
@@ -183,13 +218,18 @@ public class Drugref {
          * @return "running" if a new update was started, or "updating" if one is already in progress
          */
         public String updateDB(){
-            if(!UPDATE_DB){
-                RxUpdateDBWorker worker = new RxUpdateDBWorker();
-                worker.start();                
-                return "running";
-            }else{                
-                return "updating";
+            // Guarded by the class monitor and the flag set here rather than in the
+            // worker: two requests arriving together used to both pass the check and
+            // start two workers rebuilding the same tables.
+            synchronized (Drugref.class) {
+                if (UPDATE_DB || UpdateStatus.get().isRunning()) {
+                    return "updating";
+                }
+                UPDATE_DB = true;
             }
+            RxUpdateDBWorker worker = new RxUpdateDBWorker();
+            worker.start();
+            return "running";
         }
 
         /**

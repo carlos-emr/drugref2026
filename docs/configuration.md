@@ -28,7 +28,7 @@ In the DevContainer, the Dockerfile copies a properties file to `/root/drugref2.
 | `interaction_base_url` | Medi-Span data server URL | `https://download.oscar-emr.com/ws/rs/accounts` |
 | `scheduled_timer` | Medi-Span status poll interval (ms) | `300000` (5 minutes) |
 | `licence_key` | Medi-Span license key | (none) |
-| `DPD_BASE_URL` | Health Canada DPD download URL | `https://www.canada.ca/content/dam/hc-sc/documents/services/drug-product-database` |
+| `DPD_BASE_URL` | Health Canada DPD download URL; the three archive names are appended to it. Point it at a local mirror to run an update offline. | `https://www.canada.ca/content/dam/hc-sc/documents/services/drug-product-database` |
 
 > **The bundled `db_user` / `db_password` defaults are non-functional placeholders —
 > supplying real credentials in the external overlay is REQUIRED.** They name an

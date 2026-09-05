@@ -366,12 +366,32 @@ public class ConfigureSearchData {
             }
             // For generic entries (cat 11/12), set drugCode = id so they are self-referencing.
             // This makes the search table id serve as the "drug code" for generics.
-            Query updateQuery = em.createQuery("update CdDrugSearch cds set cds.drugCode = cds.id where cds.category = 11 or cds.category = 12");
-            updateQuery.executeUpdate();
+            assignGenericDrugCodes(em);
             em.flush();
             em.clear();
             // System.out.println("DONE Import Generics");
             tx.commit();
+        }
+
+        /**
+         * Points every category 11/12 row's {@code drugCode} at its own {@code id}.
+         *
+         * <p>{@code drugCode} is a String column and {@code id} an Integer. The
+         * original statement assigned one to the other directly; Hibernate 5
+         * let the database coerce it, Hibernate 7 rejects it at query
+         * compilation ({@code SemanticException: Cannot assign expression of
+         * type Integer to target path of type String}). That exception escaped
+         * the worker thread on every update after the Hibernate 7 upgrade, so
+         * the update never completed. The explicit {@code cast} is portable HQL.
+         *
+         * @param em an EntityManager with an active transaction
+         * @return the number of rows updated
+         */
+        static int assignGenericDrugCodes(EntityManager em) {
+            Query updateQuery = em.createQuery(
+                    "update CdDrugSearch cds set cds.drugCode = cast(cds.id as String)"
+                    + " where cds.category = 11 or cds.category = 12");
+            return updateQuery.executeUpdate();
         }
 
      

@@ -24,6 +24,7 @@ import jakarta.servlet.ServletContextEvent;
 import jakarta.servlet.ServletContextListener;
 
 import org.apache.logging.log4j.Logger;
+import io.github.carlos_emr.drugref2026.ca.dpd.fetch.DpdTableSwap;
 import io.github.carlos_emr.drugref2026.dinInteractionCheck.InteractionsCheckerFactory;
 
 /**
@@ -89,6 +90,12 @@ public class StartUp implements ServletContextListener {
                 logger.error( "properties file not found at" + propertiesFilePath, exc);
 			}
 		}
+
+		// A database update that was cut short (JVM exit mid-import) leaves the
+		// previous dataset parked as *_prev tables and the live tables partial.
+		// Put it back now, before anything touches Spring and Hibernate validates
+		// the schema against those live tables.
+		DpdTableSwap.restoreIfInterrupted();
 
 		// Initialize the Medi-Span interaction checker. This reads the licence_key property
 		// and loads the interaction database file in the background if licensed.

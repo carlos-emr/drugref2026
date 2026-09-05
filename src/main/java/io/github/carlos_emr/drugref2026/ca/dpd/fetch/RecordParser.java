@@ -74,6 +74,7 @@ import io.github.carlos_emr.drugref2026.util.DrugrefProperties;
  * @author jaygallagher
  */
 public class RecordParser {
+    private static final org.apache.logging.log4j.Logger logger = io.github.carlos_emr.drugref2026.util.MiscUtils.getLogger();
 
     /**
      * Returns a diagnostic string showing the current JVM heap memory usage
@@ -130,7 +131,8 @@ public class RecordParser {
     static public Date getDate(String s) throws Exception {
     // drug.txt "10000","","Veterinary","00813761","LINCOMIX","","N","69580","1","03-DEC-2018","0105826008","Vétérinaire","",""
     // dd-MMM-yy format will correctly handle both 03-DEC-2018 and 03-DEC-18
-        DateFormat formatter = new SimpleDateFormat("dd-MMM-yy");
+        // Month abbreviations are English in the extract whatever the server's locale is
+        DateFormat formatter = new SimpleDateFormat("dd-MMM-yy", java.util.Locale.ENGLISH);
         Date date = (Date) formatter.parse(s);
         return date;
     }
@@ -173,7 +175,7 @@ public class RecordParser {
      * @throws Exception if parsing or persistence fails
      */
     public static Object getDPDObject(String type, InputStream is, EntityManager em) throws Exception {
-        p("TYPE",type);
+        logger.info("DrugRef update: parsing " + type);
         InputStreamReader isr = new InputStreamReader(is, "UTF-8");
         Reader in = new BufferedReader(isr);
         CSVParser csv = new CSVParser(is);
@@ -204,7 +206,7 @@ public class RecordParser {
                 vet.setDrugCode(new Integer(items[0]));
                 vet.setVetSpecies(items[1]);
                 vet.setVetSubSpecies(items[2]);
-                em.persist(vet);
+                persistBatched(em, vet);
                 //em.flush();
                 //em.clear();
                 vet = null;
@@ -229,9 +231,7 @@ public class RecordParser {
             CSVParser csv2 = new CSVParser(ins);
             int count=0;
             while ((items = csv2.getLine()) != null) {
-            	if("EFBBBF".equals(bytesToHex(items[0].substring(0, 1).getBytes()))) {
-            		items[0] = items[0].substring(1).replaceAll("\"", "");
-            	}
+            	stripBom(items);
             	
             	//System.out.println("reading comps,line number="+count);
                 //System.out.println(looksLike(items));
@@ -276,7 +276,7 @@ public class RecordParser {
 
                 //  System.out.println("addrBillingFlag>"+vet.getAddressBillingFlag()+"<");
 
-                em.persist(vet);
+                persistBatched(em, vet);
                 //em.flush();
                 //em.clear();
                 vet = null;
@@ -308,9 +308,7 @@ public class RecordParser {
               //  if (str2.startsWith("LAIT SOLAIRE PROTECTION M")) {
                     //p("#################################### insert before", str2);
               //  }
-                if("EFBBBF".equals(bytesToHex(items[0].substring(0, 1).getBytes()))) {
-            		items[0] = items[0].substring(1).replaceAll("\"", "");
-            	}
+                stripBom(items);
                 prod.setDrugCode(new Integer(items[0]));
                 prod.setProductCategorization(items[1]);
                 prod.setClass1(items[2]);
@@ -328,7 +326,7 @@ public class RecordParser {
 
                 if("HUMAN".equalsIgnoreCase(prod.getClass1()) || ("YES".equalsIgnoreCase(all_drug_classes))  ){
                     //p("true if in cdp");
-                    em.persist(prod);
+                    persistBatched(em, prod);
                     //em.flush();
                     //em.clear();
                 }
@@ -343,14 +341,12 @@ public class RecordParser {
             PHARMACEUTICAL_FORM                            VARCHAR2(40)
              */
             while ((items = csv.getLine()) != null) {
-            	if("EFBBBF".equals(bytesToHex(items[0].substring(0, 1).getBytes()))) {
-            		items[0] = items[0].substring(1).replaceAll("\"", "");
-            	}
+            	stripBom(items);
             	CdForm vet = new CdForm();
                 vet.setDrugCode(new Integer(items[0]));
                 vet.setPharmCdFormCode(new Integer((items[1])));
                 vet.setPharmaceuticalCdForm(items[2]);
-                em.persist(vet);
+                persistBatched(em, vet);
                 //em.flush();
                 //em.clear();
                 vet = null;
@@ -388,9 +384,7 @@ public class RecordParser {
 
             while ((items = csv2.getLine()) != null) {
 
-            	if("EFBBBF".equals(bytesToHex(items[0].substring(0, 1).getBytes()))) {
-            		items[0] = items[0].substring(1).replaceAll("\"", "");
-            	}
+            	stripBom(items);
                 //        System.out.println(looksLike(items));
                 CdActiveIngredients vet = new CdActiveIngredients();
                 vet.setDrugCode(new Integer(items[0]));
@@ -404,7 +398,7 @@ public class RecordParser {
                 vet.setBase(items[8]);//.charAt(0));
                 vet.setDosageUnit(items[9]);
                 vet.setNotes(items[10]);
-                em.persist(vet);
+                persistBatched(em, vet);
                 //em.flush();
                 //em.clear();
                 vet = null;
@@ -419,9 +413,7 @@ public class RecordParser {
             PRODUCT_INFORMATION                              VARCHAR2(80)
              */
             while ((items = csv.getLine()) != null) {
-            	if("EFBBBF".equals(bytesToHex(items[0].substring(0, 1).getBytes()))) {
-            		items[0] = items[0].substring(1).replaceAll("\"", "");
-            	}
+            	stripBom(items);
                 //    System.out.println(looksLike(items));
                 CdPackaging vet = new CdPackaging();
                 vet.setDrugCode(new Integer(items[0]));
@@ -430,7 +422,7 @@ public class RecordParser {
                 vet.setPackageType(items[3]);
                 vet.setPackageSize(items[4]);
                 vet.setProductInforation(items[5]);
-                em.persist(vet);
+                persistBatched(em, vet);
                 //em.flush();
                 //em.clear();
             }
@@ -441,13 +433,11 @@ public class RecordParser {
              */
             while ((items = csv.getLine()) != null) {
                 //      System.out.println(looksLike(items));
-            	if("EFBBBF".equals(bytesToHex(items[0].substring(0, 1).getBytes()))) {
-            		items[0] = items[0].substring(1).replaceAll("\"", "");
-            	}
+            	stripBom(items);
                 CdPharmaceuticalStd vet = new CdPharmaceuticalStd();
                 vet.setDrugCode(new Integer(items[0]));
                 vet.setPharmaceuticalStd(items[1]);
-                em.persist(vet);
+                persistBatched(em, vet);
                 //em.flush();
                 //em.clear();
             }
@@ -458,15 +448,13 @@ public class RecordParser {
             ROUTE_OF_ADMINISTRATION                          VARCHAR2(40)
              */
             while ((items = csv.getLine()) != null) {
-            	if("EFBBBF".equals(bytesToHex(items[0].substring(0, 1).getBytes()))) {
-            		items[0] = items[0].substring(1).replaceAll("\"", "");
-            	}
+            	stripBom(items);
                 //System.out.println(looksLike(items));
                 CdRoute vet = new CdRoute();
                 vet.setDrugCode(new Integer(items[0]));
                 vet.setRouteOfAdministrationCode(new Integer(items[1]));
                 vet.setRouteOfAdministration(items[2]);
-                em.persist(vet);
+                persistBatched(em, vet);
                 //em.flush();
                 //em.clear();
             }
@@ -477,14 +465,12 @@ public class RecordParser {
             SCHEDULE                                         VARCHAR2(40)
              */
             while ((items = csv.getLine()) != null) {
-            	if("EFBBBF".equals(bytesToHex(items[0].substring(0, 1).getBytes()))) {
-            		items[0] = items[0].substring(1).replaceAll("\"", "");
-            	}
+            	stripBom(items);
                 //   System.out.println(looksLike(items));
                 CdSchedule vet = new CdSchedule();
                 vet.setDrugCode(new Integer(items[0]));
                 vet.setSchedule(items[1]);
-                em.persist(vet);
+                persistBatched(em, vet);
                 //em.flush();
                 //em.clear();
             }
@@ -497,16 +483,14 @@ public class RecordParser {
 
              */
             while ((items = csv.getLine()) != null) {
-            	if("EFBBBF".equals(bytesToHex(items[0].substring(0, 1).getBytes()))) {
-            		items[0] = items[0].substring(1).replaceAll("\"", "");
-            	}
+            	stripBom(items);
                 //    System.out.println(looksLike(items));
                 CdDrugStatus vet = new CdDrugStatus();
                 vet.setDrugCode(new Integer(items[0]));
                 vet.setCurrentStatusFlag(items[1]);//.charAt(0));
                 vet.setStatus(items[2]);
                 vet.setHistoryDate(getDate(items[3]));
-                em.persist(vet);
+                persistBatched(em, vet);
                 //em.flush();
                 //em.clear();
             }
@@ -520,15 +504,21 @@ public class RecordParser {
              //"778","C03AA03","HYDROCHLOROTHIAZIDE",""
             while ((items = csv.getLine()) != null) {
                 //    System.out.println(looksLike(items));
-            	if("EFBBBF".equals(bytesToHex(items[0].substring(0, 1).getBytes()))) {
-            		items[0] = items[0].substring(1).replaceAll("\"", "");
-            	}
+            	stripBom(items);
                 CdTherapeuticClass vet = new CdTherapeuticClass();
                 vet.setDrugCode(new Integer(items[0]));
                 vet.setTcAtcNumber(items[1]);
                 vet.setTcAtc(items[2]);
-                vet.setTcAtcf(items[3]);
-                em.persist(vet);
+                if (items.length >= 7) {
+                    // The 2018 inactive-product cut (ther_ia.txt) still has the pre-2022 layout:
+                    // DRUG_CODE, TC_ATC_NUMBER, TC_ATC, TC_AHFS_NUMBER, TC_AHFS, "", TC_ATC_F
+                    vet.setTcAhfsNumber(items[3]);
+                    vet.setTcAhfs(items[4]);
+                    vet.setTcAtcf(items[6]);
+                } else {
+                    vet.setTcAtcf(items[3]);
+                }
+                persistBatched(em, vet);
                 //em.flush();
                 //em.clear();
             }
@@ -537,24 +527,20 @@ public class RecordParser {
             
              while ((items = csv.getLine()) != null) {
                 //    System.out.println(looksLike(items));
-            	 if("EFBBBF".equals(bytesToHex(items[0].substring(0, 1).getBytes()))) {
-             		items[0] = items[0].substring(1).replaceAll("\"", "");
-             	}
+            	 stripBom(items);
                 CdInactiveProducts vet = new CdInactiveProducts();
                 vet.setDrugCode(new Integer(items[0]));
                 vet.setDrugIdentificationNumber(items[1]);
                 vet.setBrandName(items[2]);
                 vet.setHistoryDate(getDate(items[3]));
-                em.persist(vet);
+                persistBatched(em, vet);
                 //em.flush();
                 //em.clear();
             }
 
         }else if("interactions-holbrook.txt".equals(type)){
            while ((items = csv.getLine()) != null) {
-        	   if("EFBBBF".equals(bytesToHex(items[0].substring(0, 1).getBytes()))) {
-           		items[0] = items[0].substring(1).replaceAll("\"", "");
-           	}
+        	   stripBom(items);
                 Interactions inter = new Interactions();
                 inter.setId(Integer.parseInt(items[0]));
                 inter.setAffectingatc(items[1]);
@@ -565,14 +551,51 @@ public class RecordParser {
                 inter.setComment(items[6]);
                 inter.setAffectingdrug(items[7]);
                 inter.setAffecteddrug(items[8]);                
-                em.persist(inter);
+                persistBatched(em, inter);
                 //em.flush();
                 //em.clear();
             }
         }
-       tx.commit();
+        em.flush();
+        em.clear();
+        tx.commit();
         long end=System.currentTimeMillis();
-        System.out.println("========time spent on type "+type+" is "+(end-start));
+        logger.info("DrugRef update: parsed " + type + " in " + (end - start) + " ms");
         return null;
     }
+
+    /**
+     * Removes a UTF-8 byte-order mark that Health Canada's export leaves on the first
+     * field of a file, and the stray quote that comes with it. Tolerates an empty
+     * first field (the previous inline check threw on it).
+     */
+    private static void stripBom(String[] items) {
+        if (items.length == 0 || items[0] == null || items[0].isEmpty()) {
+            return;
+        }
+        if ("EFBBBF".equals(bytesToHex(items[0].substring(0, 1).getBytes(java.nio.charset.StandardCharsets.UTF_8)))) {
+            items[0] = items[0].substring(1).replaceAll("\"", "");
+        }
+    }
+
+    /** Persist-and-clear cadence: large enough to batch, small enough to keep the context tiny. */
+    private static final int BATCH_SIZE = 500;
+
+    /**
+     * Persists one parsed row and periodically flushes and clears the persistence
+     * context. Without this every entity from every file of the extract (several
+     * hundred thousand rows, plus Hibernate's per-entity snapshot) stayed in memory
+     * until the whole import finished, inside a JVM shared with the EMR.
+     */
+    private static void persistBatched(EntityManager em, Object entity) {
+        em.persist(entity);
+        int n = batchCounter.incrementAndGet();
+        if (n % BATCH_SIZE == 0) {
+            em.flush();
+            em.clear();
+        }
+    }
+
+    private static final java.util.concurrent.atomic.AtomicInteger batchCounter =
+            new java.util.concurrent.atomic.AtomicInteger();
 }

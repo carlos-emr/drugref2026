@@ -207,6 +207,24 @@ Get the timestamp of the most recent successful database update.
 
 **Returns:** Date/time string, `"updating"` if an update is in progress, or `null` if no history exists.
 
+### `getUpdateStatus()`
+Report the outcome of the most recent `updateDB()` attempt in this JVM. Use it to
+poll after `updateDB()`: `getLastUpdateTime()` cannot tell a running update from
+one that failed.
+
+**Returns:** `struct` with string members:
+
+| Key | Values |
+|-----|--------|
+| `state` | `IDLE` (no attempt since startup), `RUNNING`, `SUCCEEDED`, `FAILED` |
+| `step` | Pipeline step in progress, or the one that failed (e.g. `downloading Health Canada DPD archives`) |
+| `message` | Summary on success; on failure the step and root cause, and whether the previous dataset was restored |
+| `startedAt` / `finishedAt` | `yyyy-MM-dd HH:mm:ss` in the server's zone, or empty |
+| `lastUpdate` | Newest `history` timestamp, or empty; never `"updating"` |
+
+A failed update restores the previous dataset and clears the in-progress flag,
+so `updateDB()` can be called again without restarting the service.
+
 ---
 
 ## Service Metadata Methods
