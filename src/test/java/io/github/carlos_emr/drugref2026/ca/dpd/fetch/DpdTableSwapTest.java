@@ -359,6 +359,64 @@ class DpdTableSwapTest {
     }
 
     @Test
+    void shouldEmptyAnImportCreatedTable_whenTheBackupProvablyCompleted() throws SQLException {
+        // The fixture has no cd_companies, so backupLiveTables() has nothing to move for it
+        // and records that fact. The abandoned import then creates it. On restore that table
+        // has no *_prev, and the recorded set proves the backup finished without it -- so it
+        // did not exist before, its rows belong to the abandoned run, and it is emptied. Not
+        // dropped: Hibernate validates the schema against it at startup.
+        swap.backupLiveTables();
+        try (Statement st = con.createStatement()) {
+            st.execute("CREATE TABLE cd_companies (id int primary key, name varchar(200))");
+            st.execute("INSERT INTO cd_companies VALUES (1, 'FROM-THE-ABANDONED-RUN')");
+        }
+
+        assertThat(swap.restoreBackupTables()).isEqualTo(2);
+
+        assertThat(exists("cd_companies")).as("kept for schema validation").isTrue();
+        assertThat(scalarCount("cd_companies")).as("rows from the abandoned run").isZero();
+        assertThat(scalar("SELECT brand_name FROM cd_drug_product")).isEqualTo("OLD-AMOXICILLIN");
+    }
+
+    @Test
+    void shouldLeaveAnOrphanAlone_whenTheRenameLoopNeverCompleted() throws SQLException {
+        // A NULL moved column is what a crash partway through the rename loop leaves, and
+        // then an orphan may be a table the loop never reached, still holding the ORIGINAL
+        // rows. Emptying it here would destroy real data, so nothing is decided.
+        swap.backupLiveTables();
+        try (Statement st = con.createStatement()) {
+            st.execute("UPDATE " + DpdTableSwap.STATE_TABLE + " SET " + DpdTableSwap.MOVED_COLUMN + " = NULL");
+            st.execute("CREATE TABLE cd_companies (id int primary key, name varchar(200))");
+            st.execute("INSERT INTO cd_companies VALUES (1, 'ORIGINAL-NEVER-MOVED')");
+        }
+
+        swap.restoreBackupTables();
+
+        assertThat(scalar("SELECT name FROM cd_companies")).isEqualTo("ORIGINAL-NEVER-MOVED");
+    }
+
+    @Test
+    void shouldTreatAMarkerFromAnOlderBuild_asUnknown() throws SQLException {
+        // A build before the column existed can leave a BACKUP marker mid-swap. Its loop's
+        // fate is unknowable, so restore must take the conservative path, and must do so by
+        // reading the metadata -- not by catching the failed SELECT and swallowing whatever
+        // else might be wrong with the database.
+        try (Statement st = con.createStatement()) {
+            st.execute("ALTER TABLE cd_drug_product RENAME TO cd_drug_product_prev");
+            st.execute("CREATE TABLE " + DpdTableSwap.STATE_TABLE + " (state varchar(16) NOT NULL)");
+            st.execute("INSERT INTO " + DpdTableSwap.STATE_TABLE + " VALUES ('BACKUP')");
+            st.execute("CREATE TABLE cd_companies (id int primary key, name varchar(200))");
+            st.execute("INSERT INTO cd_companies VALUES (1, 'ORIGINAL-OLD-BUILD')");
+        }
+
+        assertThat(swap.readMovedSet(con)).isNull();
+        assertThat(swap.restoreBackupTables()).isEqualTo(1);
+
+        assertThat(scalar("SELECT name FROM cd_companies")).isEqualTo("ORIGINAL-OLD-BUILD");
+        assertThat(scalar("SELECT brand_name FROM cd_drug_product")).isEqualTo("OLD-AMOXICILLIN");
+    }
+
+    @Test
     void shouldDoNothing_whenNoBackupPresent() throws SQLException {
         assertThat(swap.restoreBackupTables()).isZero();
         assertThat(scalar("SELECT brand_name FROM cd_drug_product")).isEqualTo("OLD-AMOXICILLIN");
@@ -367,6 +425,10 @@ class DpdTableSwapTest {
 
     private boolean exists(String table) throws SQLException {
         return DpdTableSwap.tableExists(con, table);
+    }
+
+    private int scalarCount(String table) throws SQLException {
+        return Integer.parseInt(scalar("SELECT count(*) FROM " + table));
     }
 
     private String scalar(String sql) throws SQLException {

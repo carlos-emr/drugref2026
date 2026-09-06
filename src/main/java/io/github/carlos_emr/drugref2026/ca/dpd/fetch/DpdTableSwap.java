@@ -83,6 +83,15 @@ public final class DpdTableSwap {
     static final String STATE_DISCARD = "DISCARD";
 
     /**
+     * Marker column holding the comma-separated tables {@link #backupLiveTables()} actually
+     * renamed, written in one statement AFTER the rename loop completes. {@code NULL} therefore
+     * means "the loop did not finish", and an empty string means "it finished and moved
+     * nothing" — the two are deliberately distinct. Absent entirely on a marker written by a
+     * build before this column existed.
+     */
+    static final String MOVED_COLUMN = "moved";
+
+    /**
      * Every table the import rebuilds. {@code history}, {@code utility} and any
      * site-specific tables are untouched by an update and so are not swapped.
      */
@@ -138,6 +147,7 @@ public final class DpdTableSwap {
             // halfway must still be recognisable as an interrupted backup, or the
             // half-moved dataset is left with no record of what happened to it.
             openState(con, st);
+            List<String> moved = new ArrayList<>();
             for (String table : SWAPPED_TABLES) {
                 String backup = table + BACKUP_SUFFIX;
                 if (tableExists(con, backup)) {
@@ -145,8 +155,15 @@ public final class DpdTableSwap {
                 }
                 if (tableExists(con, table)) {
                     renameTable(st, table, backup);
+                    moved.add(table);
                 }
             }
+            // Recorded only now, in one statement, so its presence is proof the loop
+            // completed. That is what lets restoreBackupTables() tell an orphan the import
+            // created (safe to empty) from one this loop never reached (holding the original
+            // rows). A crash anywhere above leaves it NULL and restore stays conservative.
+            st.execute("UPDATE " + STATE_TABLE + " SET " + MOVED_COLUMN + " = '"
+                    + String.join(",", moved) + "'");
         }
         logger.info("DrugRef update: previous dataset kept as " + BACKUP_SUFFIX + " tables");
     }
@@ -155,37 +172,40 @@ public final class DpdTableSwap {
      * Puts the backup set back under the live names, dropping whatever partial
      * tables the failed import left behind, and clears the state marker.
      *
-     * <p>A live table that has no {@code *_prev} counterpart is left alone, and that is a
-     * deliberate choice between two bad outcomes rather than an oversight. Such a table is
-     * one of two things, and this method cannot tell which:
-     * <ul>
-     *   <li>a table the importer created that had no previous version — leaving it keeps the
-     *       abandoned import's rows beside the restored dataset;</li>
-     *   <li>a table {@link #backupLiveTables()} never got to, because the rename loop failed
-     *       partway — in which case it still holds the <em>original</em> rows, untouched.</li>
-     * </ul>
-     * Emptying it would restore the first case exactly and destroy real data in the second,
-     * and the second is the more likely of the two (a rename loop dying partway needs only a
-     * lock timeout, while the first needs a schema that predates one of these tables). So the
-     * rows are left and the situation is logged: an orphan is visible to the operator rather
-     * than silently resolved in the direction that can lose data.
-     *
-     * <p>The principled fix is for {@link #backupLiveTables()} to record which tables it
-     * actually moved, which turns the guess into a fact and makes both cases exact. That is a
-     * change to the marker's shape and belongs with a run of the full repair matrix against
-     * MariaDB, not with this one.
+     * <p>A live table that has no {@code *_prev} counterpart is one of two things: a table
+     * the importer created that had no previous version (its rows belong to the abandoned
+     * run), or a table {@link #backupLiveTables()} never reached because the rename loop
+     * failed partway (it still holds the <em>original</em> rows). Emptying it is right in the
+     * first case and destroys data in the second, so the decision is made on evidence, never
+     * on a guess: the marker's {@link #MOVED_COLUMN} is written only once the rename loop has
+     * completed. When it is present, the backup provably finished and any live table it does
+     * not list did not exist then — the import created it, and it is emptied (not dropped, so
+     * Hibernate's startup validation still finds it). When it is {@code NULL}, or the marker
+     * predates the column, the loop's fate is unknown and the table is left as it is, with a
+     * warning naming both possibilities for the operator.
      *
      * @return the number of tables restored
      */
     public int restoreBackupTables() throws SQLException {
         int restored = 0;
         List<String> orphans = new ArrayList<>();
+        List<String> emptied = new ArrayList<>();
         try (Connection con = connect(); Statement st = con.createStatement()) {
+            List<String> moved = readMovedSet(con);
             for (String table : SWAPPED_TABLES) {
                 String backup = table + BACKUP_SUFFIX;
                 if (!tableExists(con, backup)) {
                     if (tableExists(con, table)) {
-                        orphans.add(table);
+                        if (moved != null && !moved.contains(table)) {
+                            // The backup provably completed and did not move this table,
+                            // so it did not exist then: the import created it, and its rows
+                            // belong to the abandoned run. Emptied, not dropped -- Hibernate
+                            // validates the schema against it at startup.
+                            st.execute("DELETE FROM " + table);
+                            emptied.add(table);
+                        } else {
+                            orphans.add(table);
+                        }
                     }
                     continue;
                 }
@@ -198,6 +218,9 @@ public final class DpdTableSwap {
             clearState(con, st);
         }
         logger.info("DrugRef update: restored " + restored + " table(s) from the " + BACKUP_SUFFIX + " set");
+        if (!emptied.isEmpty()) {
+            logger.info("DrugRef update: emptied " + emptied + ", which the abandoned import had created");
+        }
         if (!orphans.isEmpty()) {
             // Not an error, and not silently fine either. See the note above on why these are
             // left as they are; the operator is the one who can tell which case this is.
@@ -373,6 +396,44 @@ public final class DpdTableSwap {
     }
 
     /**
+     * @return the tables the last {@link #backupLiveTables()} renamed, or {@code null} when
+     *         that cannot be known — the loop did not complete, there is no marker, or the
+     *         marker was written by a build before {@link #MOVED_COLUMN} existed. An empty
+     *         list is a completed backup that moved nothing, and is not {@code null}.
+     */
+    List<String> readMovedSet(Connection con) throws SQLException {
+        if (!tableExists(con, STATE_TABLE)) {
+            return null;
+        }
+        // Column presence is checked through metadata rather than by catching the failed
+        // SELECT: a marker from an older build lacks the column, and that must read as
+        // "unknown" without swallowing any other SQLException on the way.
+        DatabaseMetaData meta = con.getMetaData();
+        try (ResultSet cols = meta.getColumns(con.getCatalog(), null, STATE_TABLE, MOVED_COLUMN)) {
+            if (!cols.next()) {
+                return null;
+            }
+        }
+        try (Statement st = con.createStatement();
+             ResultSet rs = st.executeQuery("SELECT " + MOVED_COLUMN + " FROM " + STATE_TABLE)) {
+            if (!rs.next()) {
+                return null;
+            }
+            String value = rs.getString(1);
+            if (value == null) {
+                return null;
+            }
+            List<String> moved = new ArrayList<>();
+            for (String name : value.split(",")) {
+                if (!name.isEmpty()) {
+                    moved.add(name);
+                }
+            }
+            return moved;
+        }
+    }
+
+    /**
      * Decides what an empty marker table means, by looking at whether any dataset was
      * actually moved aside.
      *
@@ -420,7 +481,8 @@ public final class DpdTableSwap {
         if (tableExists(con, STATE_TABLE)) {
             st.execute("DROP TABLE " + STATE_TABLE);
         }
-        st.execute("CREATE TABLE " + STATE_TABLE + " (state varchar(16) NOT NULL)");
+        st.execute("CREATE TABLE " + STATE_TABLE + " (state varchar(16) NOT NULL, "
+                + MOVED_COLUMN + " varchar(1024) NULL)");
         st.execute("INSERT INTO " + STATE_TABLE + " (state) VALUES ('" + STATE_BACKUP + "')");
     }
 
@@ -439,8 +501,10 @@ public final class DpdTableSwap {
             if (!tableExists(con, STATE_TABLE)) {
                 // No swap is in flight (an update over an empty schema, say). Record the
                 // commit directly rather than leaving no marker at all.
-                st.execute("CREATE TABLE " + STATE_TABLE + " (state varchar(16) NOT NULL)");
-                st.execute("INSERT INTO " + STATE_TABLE + " (state) VALUES ('" + STATE_DISCARD + "')");
+                st.execute("CREATE TABLE " + STATE_TABLE + " (state varchar(16) NOT NULL, "
+                        + MOVED_COLUMN + " varchar(1024) NULL)");
+                st.execute("INSERT INTO " + STATE_TABLE + " (state, " + MOVED_COLUMN + ") VALUES ('"
+                        + STATE_DISCARD + "', '')");
                 return;
             }
             st.execute("UPDATE " + STATE_TABLE + " SET state = '" + STATE_DISCARD + "'");
