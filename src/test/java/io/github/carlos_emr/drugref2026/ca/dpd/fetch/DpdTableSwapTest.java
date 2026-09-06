@@ -17,6 +17,7 @@
 package io.github.carlos_emr.drugref2026.ca.dpd.fetch;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.sql.Connection;
@@ -308,6 +309,53 @@ class DpdTableSwapTest {
         // what getLastUpdateTime() reads and must survive a rolled-back update.
         assertThat(swap.restoreBackupTables()).isEqualTo(2);
         assertThat(scalar("SELECT brand_name FROM cd_drug_product")).isEqualTo("OLD-AMOXICILLIN");
+    }
+
+    @Test
+    void shouldRefuseToStart_whenTheMarkerIsUndecidable() throws SQLException {
+        // The guard the class documents ("refusing to start") did not fire. readState() threw a
+        // plain SQLException for the undecidable marker and restoreIfInterrupted() caught it in
+        // the same block as "could not reach the database", logged, and returned — so the
+        // context deployed and served whatever was in the live tables. Found by running the
+        // repair matrix against MariaDB; every unit test passed throughout.
+        swap.backupLiveTables();
+        try (Statement st = con.createStatement()) {
+            st.execute("DELETE FROM " + DpdTableSwap.STATE_TABLE);
+        }
+
+        assertThatThrownBy(() -> DpdTableSwap.restoreIfInterrupted(swap))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("unreadable")
+                .hasCauseInstanceOf(DpdTableSwap.UndecidableSwapState.class);
+    }
+
+    @Test
+    void shouldNotRefuseToStart_whenTheDatabaseIsSimplyUnreachable() throws SQLException {
+        // The other half of the distinction, and why this needs a type rather than a message
+        // check: an unreachable database must NOT take the context down here. Hibernate's own
+        // schema validation reports it a moment later with a better message, and a startup
+        // repair that cannot run is not evidence the data is bad.
+        DpdTableSwap unreachable = new DpdTableSwap("jdbc:h2:mem:nosuchdb;IFEXISTS=TRUE", "sa", "");
+
+        assertThatCode(() -> DpdTableSwap.restoreIfInterrupted(unreachable))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
+    void shouldRepairAndReturn_whenTheSwapIsResolvable() throws SQLException {
+        // And the ordinary path still repairs rather than refusing.
+        swap.backupLiveTables();
+        // backupLiveTables() renames the live table away, so this stands in for the half-built
+        // one an abandoned import leaves behind under the live name.
+        try (Statement st = con.createStatement()) {
+            st.execute("CREATE TABLE cd_drug_product (id int primary key, brand_name varchar(200))");
+            st.execute("INSERT INTO cd_drug_product VALUES (99, 'HALF-BUILT')");
+        }
+
+        DpdTableSwap.restoreIfInterrupted(swap);
+
+        assertThat(scalar("SELECT brand_name FROM cd_drug_product")).isEqualTo("OLD-AMOXICILLIN");
+        assertThat(exists(DpdTableSwap.STATE_TABLE)).isFalse();
     }
 
     @Test

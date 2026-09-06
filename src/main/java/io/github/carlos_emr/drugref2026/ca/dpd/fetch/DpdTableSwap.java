@@ -254,6 +254,28 @@ public final class DpdTableSwap {
         return "restored the previous dataset (" + restored + " table(s))";
     }
 
+    /**
+     * Thrown when the swap state has been read successfully and is <em>undecidable</em> — as
+     * opposed to not having been readable at all.
+     *
+     * <p>The distinction is the whole point of the type. {@link #restoreIfInterrupted()} must
+     * swallow "I could not reach the database", because Hibernate's own schema validation
+     * reports that a moment later with a better message and a startup repair should not be what
+     * takes the context down. It must NOT swallow "I looked, and the only record of which half
+     * of a swap the process died in is gone": that is the one state where continuing means
+     * serving drug data that may be half a rebuild. Both used to arrive as a plain
+     * {@link SQLException} through the same catch, so the documented refusal never fired and
+     * the service came up regardless — found by running the repair matrix against MariaDB, not
+     * by reading the code.
+     */
+    public static class UndecidableSwapState extends SQLException {
+        private static final long serialVersionUID = 1L;
+
+        UndecidableSwapState(String message) {
+            super(message);
+        }
+    }
+
     /** @return the backup tables currently present, empty when no update was interrupted */
     public List<String> listBackupTables() throws SQLException {
         List<String> present = new ArrayList<>();
@@ -275,12 +297,25 @@ public final class DpdTableSwap {
      * from deploying.
      */
     public static void restoreIfInterrupted() {
-        DpdTableSwap swap = new DpdTableSwap();
+        restoreIfInterrupted(new DpdTableSwap());
+    }
+
+    /** Package-private seam so the repair decision can be tested against a real database. */
+    static void restoreIfInterrupted(DpdTableSwap swap) {
         String state;
         List<String> leftover;
         try {
             state = swap.readState();
             leftover = swap.listBackupTables();
+        } catch (UndecidableSwapState e) {
+            // Checked, and undecidable. Refuse to deploy for the same reason the failed-repair
+            // branch below does: a DrugRef that quietly answers from a half-swapped drug table
+            // is worse for a prescriber than one that is plainly unavailable.
+            logger.error("DrugRef: the interrupted database update cannot be resolved; refusing to start", e);
+            throw new IllegalStateException(
+                    "DrugRef: a previous database update was interrupted and its state marker is"
+                    + " unreadable, so it is not possible to tell whether it had been committed."
+                    + " Inspect the " + BACKUP_SUFFIX + " tables by hand before starting the service.", e);
         } catch (SQLException | RuntimeException e) {
             // Cannot tell whether a repair is needed. Hibernate's own schema validation
             // fails against the same unreachable database moments later, so let the
@@ -360,7 +395,7 @@ public final class DpdTableSwap {
     private String resolveEmptyMarker(Connection con, Statement st) throws SQLException {
         for (String table : SWAPPED_TABLES) {
             if (tableExists(con, table + BACKUP_SUFFIX)) {
-                throw new SQLException("the DrugRef update marker table " + STATE_TABLE
+                throw new UndecidableSwapState("the DrugRef update marker table " + STATE_TABLE
                         + " exists but is empty, so it is not possible to tell whether the"
                         + " previous update had been committed. Inspect the " + BACKUP_SUFFIX
                         + " tables by hand: restoring them reverts a completed update, dropping"
