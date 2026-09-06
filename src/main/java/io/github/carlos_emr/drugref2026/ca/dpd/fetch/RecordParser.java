@@ -158,24 +158,6 @@ public class RecordParser {
     }
     
     /**
-     * Parses a DPD CSV file from an InputStream, creates JPA entity objects for each record,
-     * and persists them to the database within a single transaction.
-     *
-     * <p>The file type is identified by the {@code type} parameter (the filename from the ZIP
-     * archive). Each file type has its own parsing logic that maps CSV column positions to
-     * entity fields. Character encoding is handled by converting from the input stream encoding
-     * to UTF-8 where necessary (for files containing non-ASCII characters like French text).</p>
-     *
-     * <p>A UTF-8 BOM (byte sequence EF BB BF) at the start of the first field is automatically
-     * stripped to prevent parsing errors.</p>
-     *
-     * @param type the filename identifying the DPD file type (e.g., "drug.txt", "ingred.txt")
-     * @param is the InputStream containing the CSV data
-     * @param em the EntityManager for persisting parsed entities
-     * @return always returns null (return type is vestigial)
-     * @throws Exception if parsing or persistence fails
-     */
-    /**
      * Reads a decoded character stream to the end.
      *
      * <p>Propagates, and that is the point. Three copies of this loop used to sit inline with
@@ -210,6 +192,24 @@ public class RecordParser {
         return buf.toString();
     }
 
+    /**
+     * Parses a DPD CSV file from an InputStream, creates JPA entity objects for each record,
+     * and persists them to the database within a single transaction.
+     *
+     * <p>The file type is identified by the {@code type} parameter (the filename from the ZIP
+     * archive). Each file type has its own parsing logic that maps CSV column positions to
+     * entity fields. Character encoding is handled by converting from the input stream encoding
+     * to UTF-8 where necessary (for files containing non-ASCII characters like French text).</p>
+     *
+     * <p>A UTF-8 BOM (byte sequence EF BB BF) at the start of the first field is automatically
+     * stripped to prevent parsing errors.</p>
+     *
+     * @param type the filename identifying the DPD file type (e.g., "drug.txt", "ingred.txt")
+     * @param is the InputStream containing the CSV data
+     * @param em the EntityManager for persisting parsed entities
+     * @return always returns null (return type is vestigial)
+     * @throws Exception if parsing or persistence fails
+     */
     public static Object getDPDObject(String type, InputStream is, EntityManager em) throws Exception {
         logger.info("DrugRef update: parsing " + type);
         InputStreamReader isr = new InputStreamReader(is, "UTF-8");

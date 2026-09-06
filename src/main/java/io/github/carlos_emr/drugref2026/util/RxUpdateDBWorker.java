@@ -163,21 +163,7 @@ public class RxUpdateDBWorker extends Thread{
             // costs a stale "last updated" date on correct data, which is the pessimistic
             // direction the commit ordering was chosen for in the first place.
             status.step("recording update history");
-            String historyCaveat = "";
-            try {
-                if (!new HistoryUtil().addUpdateHistory()) {
-                    historyCaveat = "; the update history row could NOT be written, so the"
-                            + " reported \"last updated\" date stays at the previous run";
-                }
-            } catch (RuntimeException e) {
-                logger.warn("DrugRef update: the new dataset is committed but the history row"
-                        + " could not be written; the reported last-update date will be stale", e);
-                historyCaveat = "; the update history row could NOT be written (" + describe(e)
-                        + "), so the reported \"last updated\" date stays at the previous run";
-            }
-            if (!historyCaveat.isEmpty()) {
-                logger.warn("DrugRef update: committed, but the history row was not written");
-            }
+            String historyCaveat = recordUpdateHistory();
 
             // Step 9: statistics for the admin interface, then let go of the old dataset
             Drugref.DB_INFO.put("tableRowNum", hm);
@@ -210,6 +196,7 @@ public class RxUpdateDBWorker extends Thread{
             // with UPDATE_DB still true, and clients saw "updating" forever.
             logger.error("DrugRef database update failed during '" + status.getStep() + "'", t);
             String reason = "failed during '" + status.getStep() + "': " + describe(t);
+            boolean committedAfterAll = false;
             if (previousDatasetMovedAside) {
                 try {
                     // recoverInterruptedSwap(), not restoreBackupTables(): the marker
@@ -221,7 +208,9 @@ public class RxUpdateDBWorker extends Thread{
                     // commit point exists to prevent. Reading the marker resolves all three
                     // cases: BACKUP restores, DISCARD finishes the cleanup, and a failure
                     // before the marker moved still reads BACKUP and restores as before.
-                    reason += " -- " + swap.recoverInterruptedSwap();
+                    DpdTableSwap.SwapRecovery recovery = swap.recoverInterruptedSwap();
+                    committedAfterAll = recovery.committed();
+                    reason += " -- " + recovery.description();
                 } catch (Exception restoreFailure) {
                     logger.error("DrugRef: could not restore the previous dataset after the failed update",
                             restoreFailure);
@@ -229,7 +218,31 @@ public class RxUpdateDBWorker extends Thread{
                             + describe(restoreFailure) + "; reload the drug reference seed";
                 }
             }
-            status.fail(reason);
+            if (committedAfterAll) {
+                // The marker had already accepted the new dataset, so this is a committed
+                // update that threw on the way back -- not an abandoned one. Reporting FAILED
+                // here would render on the admin page as "the previous drug data was kept",
+                // which is false: prescribers are searching the NEW data. The commit ordering
+                // was chosen so this window resolves to correct data with a possibly stale
+                // date, and the status has to say that rather than contradict the database and
+                // invite a retry of an update that already succeeded. The history row was
+                // never reached, so write it here, best-effort, exactly as the happy path does.
+                //
+                // This holds for an Error too. The rethrow below still happens -- the JVM's
+                // health is a separate question from which dataset is live -- but the status
+                // is the operator's only account of the data, and on that question a committed
+                // update is a committed update however the process died afterwards.
+                String recoveredCaveat = recordUpdateHistory();
+                long minutes = (System.currentTimeMillis() - startedAt) / 60000L;
+                String summary = "updated in " + minutes + " min, but the run did not finish"
+                        + " cleanly after the new dataset was committed (" + reason + ")."
+                        + " The new drug data IS live" + recoveredCaveat;
+                status.succeed(summary);
+                logger.warn("DrugRef database update committed despite a failure after the commit"
+                        + " point: " + summary);
+            } else {
+                status.fail(reason);
+            }
             if (t instanceof Error) {
                 // OutOfMemoryError and friends mean the JVM is in no state to keep
                 // serving. The rollback above was the best-effort part; the process
@@ -250,6 +263,44 @@ public class RxUpdateDBWorker extends Thread{
                 Drugref.UPDATE_DB = false;
             }
         }
+    }
+
+    /**
+     * Writes the update-history row, best effort, and reports what to tell the operator.
+     *
+     * <p>Best-effort by design, and it must be: it runs only past the commit point, where the
+     * marker has already made the new dataset the live one and there is nothing left to roll
+     * back. Throwing here used to report the run as {@code FAILED}, which the admin page renders
+     * as "the previous drug data was kept" -- a statement that is false past the commit point,
+     * and the worst kind of false, because it tells the operator to expect the old data while
+     * the new data is what prescribers are searching. A missing history row costs a stale
+     * "last updated" date on correct data, which is the pessimistic direction the commit
+     * ordering was chosen for in the first place.
+     *
+     * @return an empty string when the row was written, or a caveat to append to the success
+     *         message. The caveat is hedged on purpose: a commit that lands on the server and
+     *         then loses the connection reports as a failure here, so "was not confirmed" is
+     *         the strongest thing that can honestly be said about the date.
+     */
+    private static String recordUpdateHistory() {
+        String caveat = "";
+        try {
+            if (!new HistoryUtil().addUpdateHistory()) {
+                caveat = "; the update history row could not be confirmed as written, so the"
+                        + " reported \"last updated\" date may still show the previous run";
+            }
+        } catch (RuntimeException e) {
+            logger.warn("DrugRef update: the new dataset is committed but the history row"
+                    + " could not be confirmed as written; the reported last-update date"
+                    + " may be stale", e);
+            caveat = "; the update history row could not be confirmed as written ("
+                    + describe(e) + "), so the reported \"last updated\" date may still show"
+                    + " the previous run";
+        }
+        if (!caveat.isEmpty()) {
+            logger.warn("DrugRef update: committed, but the history row was not confirmed");
+        }
+        return caveat;
     }
 
     /** The tables an update that worked cannot leave empty, whatever else it did. */

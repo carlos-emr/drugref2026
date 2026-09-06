@@ -24,7 +24,6 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.stream.Collectors;
@@ -38,6 +37,7 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -55,8 +55,16 @@ class DpdDownloaderTest {
     private final Map<String, Integer> statuses = new HashMap<>();
     private String baseUrl;
 
+    /**
+     * Every archive this test class downloads lands here, so the leak check can look at a
+     * directory nothing else writes to. See {@link DpdDownloader#tempDir}.
+     */
+    @TempDir
+    Path downloadDir;
+
     @BeforeEach
     void startServer() throws IOException {
+        DpdDownloader.tempDir = downloadDir.toFile();
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         server.createContext("/dpd/", exchange -> {
             String name = exchange.getRequestURI().getPath().substring("/dpd/".length());
@@ -77,6 +85,7 @@ class DpdDownloaderTest {
     @AfterEach
     void stopServer() {
         server.stop(0);
+        DpdDownloader.tempDir = null;
     }
 
     @Test
@@ -118,9 +127,16 @@ class DpdDownloaderTest {
         assertThat(leaked).as("temp archives left behind by a failed download").isEmpty();
     }
 
-    /** The dpd-*.zip temp files currently on disk, so a test can diff its own leaks. */
+    /**
+     * The dpd-*.zip files in this test's own download directory.
+     *
+     * <p>Scoped to {@link DpdDownloader#tempDir}, which the fixture points at a per-test
+     * directory, rather than the shared {@code java.io.tmpdir}: that is global process state,
+     * and a concurrent build writing a {@code dpd-*.zip} while this test ran would fail it for
+     * a leak it did not cause.
+     */
     private static Set<Path> tempArchives() throws IOException {
-        Path tmp = Paths.get(System.getProperty("java.io.tmpdir"));
+        Path tmp = DpdDownloader.tempDir.toPath();
         try (Stream<Path> files = Files.list(tmp)) {
             return files.filter(p -> {
                 String n = p.getFileName().toString();

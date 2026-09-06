@@ -221,13 +221,22 @@ public final class DpdTableSwap {
         if (!emptied.isEmpty()) {
             logger.info("DrugRef update: emptied " + emptied + ", which the abandoned import had created");
         }
-        if (!orphans.isEmpty()) {
+        if (!orphans.isEmpty() && restored > 0) {
             // Not an error, and not silently fine either. See the note above on why these are
             // left as they are; the operator is the one who can tell which case this is.
             logger.warn("DrugRef update: " + orphans + " had no " + BACKUP_SUFFIX + " counterpart and"
                     + " were left as they are. Either the import created them (they now hold rows"
                     + " from the abandoned run) or the backup never reached them (they hold the"
                     + " original rows). Check them before relying on drug search.");
+        } else if (!orphans.isEmpty()) {
+            // Nothing was restored, so no rename was ever undone: backupLiveTables() failed on
+            // its first table and the live set was never disturbed. The tables above are
+            // "orphans" only in the bookkeeping sense -- they are the untouched original
+            // dataset. Warning here told operators to distrust a dataset that is provably fine,
+            // which is worse than saying nothing, because the one case the warning exists for
+            // (a partial rename) always leaves something to restore.
+            logger.info("DrugRef update: nothing had been moved aside, so the live drug tables"
+                    + " were never disturbed and are the previous dataset unchanged");
         }
         return restored;
     }
@@ -253,6 +262,23 @@ public final class DpdTableSwap {
     }
 
     /**
+     * What {@link #recoverInterruptedSwap()} found and did.
+     *
+     * <p>{@code committed} is the field that matters, and it exists because the caller cannot
+     * infer it. A worker that lands in its catch block after {@link #markDiscarding()} has
+     * committed on the server but thrown on the way back is looking at a <em>successful</em>
+     * update: the marker says {@code DISCARD}, the new dataset is live, and nothing was rolled
+     * back. Reporting that run as {@code FAILED} tells the operator the previous drug data was
+     * kept, which is the one statement the commit ordering exists to prevent being false.
+     *
+     * @param committed   the marker had already accepted the new dataset, so the recovery
+     *                    finished the cleanup and the live tables hold the NEW data
+     * @param description what was done, for the log and the status message
+     */
+    public record SwapRecovery(boolean committed, String description) {
+    }
+
+    /**
      * Settles an unfinished swap, if there is one.
      *
      * <p>{@link #STATE_BACKUP} (or a {@code *_prev} set with no marker at all, which
@@ -261,20 +287,21 @@ public final class DpdTableSwap {
      * accepted and only the cleanup was interrupted: the discard is finished, because
      * restoring here would mix the old dataset into the new one.
      *
-     * @return a description of what was done, for the log
+     * @return what was found and done, including whether the new dataset had been committed
      */
-    public String recoverInterruptedSwap() throws SQLException {
+    public SwapRecovery recoverInterruptedSwap() throws SQLException {
         String state = readState();
         List<String> leftover = listBackupTables();
         if (state == null && leftover.isEmpty()) {
-            return "nothing to recover";
+            return new SwapRecovery(false, "nothing to recover");
         }
         if (STATE_DISCARD.equals(state)) {
             discardBackupTables();
-            return "finished discarding the previous dataset (" + leftover.size() + " table(s))";
+            return new SwapRecovery(true,
+                    "finished discarding the previous dataset (" + leftover.size() + " table(s))");
         }
         int restored = restoreBackupTables();
-        return "restored the previous dataset (" + restored + " table(s))";
+        return new SwapRecovery(false, "restored the previous dataset (" + restored + " table(s))");
     }
 
     /**
@@ -314,10 +341,20 @@ public final class DpdTableSwap {
 
     /**
      * Startup repair: settle any swap that a previous run left unfinished, before
-     * Hibernate validates the schema against the live tables. Errors are logged,
-     * not thrown: an unreachable database at startup is reported by Hibernate's own
-     * validation a moment later, and this must not be what prevents the context
-     * from deploying.
+     * Hibernate validates the schema against the live tables.
+     *
+     * <p>Not every failure here is treated the same way, and the distinction is deliberate.
+     * <b>Failing to look</b> — an unreachable or unreadable database — is logged and swallowed:
+     * Hibernate's own schema validation fails against the same database moments later with a
+     * better message, and a startup repair should not be what takes the context down.
+     * <b>Looking and not being able to resolve what it found</b> throws
+     * {@link IllegalStateException} and prevents the context from deploying: that covers both an
+     * undecidable state marker ({@link UndecidableSwapState}) and a repair that was needed and
+     * failed. In both of those the live drug tables may be half a rebuild, and a DrugRef that
+     * quietly answers from those is worse for a prescriber than one that is plainly unavailable
+     * — CARLOS renders an unreachable DrugRef as a banner rather than a broken lookup.
+     *
+     * @throws IllegalStateException if an interrupted update was found and could not be resolved
      */
     public static void restoreIfInterrupted() {
         restoreIfInterrupted(new DpdTableSwap());
@@ -353,7 +390,7 @@ public final class DpdTableSwap {
         logger.warn("DrugRef: a previous database update did not finish (state=" + state
                 + ", leftover=" + leftover + "); repairing");
         try {
-            logger.warn("DrugRef: " + swap.recoverInterruptedSwap());
+            logger.warn("DrugRef: " + swap.recoverInterruptedSwap().description());
         } catch (SQLException | RuntimeException e) {
             // A repair was needed and could not be done, so the live tables are the
             // partial ones the backup set was meant to replace. Refuse to deploy: a

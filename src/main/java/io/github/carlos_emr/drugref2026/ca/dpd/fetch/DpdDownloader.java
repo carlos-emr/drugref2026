@@ -140,6 +140,18 @@ public final class DpdDownloader {
     }
 
     /**
+     * Directory for the downloaded archives, or {@code null} for the JVM's temp directory,
+     * which is what production uses.
+     *
+     * <p>A test seam, and it has to be one: {@link File#createTempFile(String, String)} resolves
+     * {@code java.io.tmpdir} once at JVM start, so a test cannot redirect it by setting the
+     * property. Without this, the only way to check that a failed download leaves nothing
+     * behind is to diff the shared temp directory, which any concurrent build writing a
+     * {@code dpd-*.zip} turns into a spurious failure.
+     */
+    static File tempDir = null;
+
+    /**
      * Fetches one URL to a temp file and verifies the result opens as a ZIP with
      * at least one entry.
      *
@@ -149,7 +161,7 @@ public final class DpdDownloader {
      */
     static File fetch(String url) throws IOException {
         logger.info("DrugRef update: downloading " + url);
-        File out = File.createTempFile("dpd-", ".zip");
+        File out = File.createTempFile("dpd-", ".zip", tempDir);
         try {
             HttpURLConnection connection = openConnection(url);
             long expected;

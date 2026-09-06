@@ -135,9 +135,10 @@ class DpdTableSwapTest {
             st.execute("ALTER TABLE cd_drug_product RENAME TO cd_drug_product_prev");
         }
 
-        String action = swap.recoverInterruptedSwap();
+        DpdTableSwap.SwapRecovery action = swap.recoverInterruptedSwap();
 
-        assertThat(action).contains("restored");
+        assertThat(action.description()).contains("restored");
+        assertThat(action.committed()).as("a restore is not a committed update").isFalse();
         assertThat(scalar("SELECT brand_name FROM cd_drug_product")).isEqualTo("OLD-AMOXICILLIN");
         assertThat(scalar("SELECT name FROM cd_drug_search")).isEqualTo("OLD-AMOXICILLIN 500MG");
         assertThat(swap.readState()).isNull();
@@ -159,9 +160,10 @@ class DpdTableSwapTest {
             st.execute("DROP TABLE cd_drug_search_prev");
         }
 
-        String action = swap.recoverInterruptedSwap();
+        DpdTableSwap.SwapRecovery action = swap.recoverInterruptedSwap();
 
-        assertThat(action).contains("discarding");
+        assertThat(action.description()).contains("discarding");
+        assertThat(action.committed()).as("a finished discard IS a committed update").isTrue();
         assertThat(swap.listBackupTables()).isEmpty();
         assertThat(scalar("SELECT brand_name FROM cd_drug_product")).isEqualTo("NEW-AMOXICILLIN");
         assertThat(scalar("SELECT name FROM cd_drug_search")).isEqualTo("NEW-AMOXICILLIN 500MG");
@@ -218,9 +220,10 @@ class DpdTableSwapTest {
         swap.markDiscarding();
 
         // ...process dies here; next start:
-        String action = swap.recoverInterruptedSwap();
+        DpdTableSwap.SwapRecovery action = swap.recoverInterruptedSwap();
 
-        assertThat(action).contains("discarding");
+        assertThat(action.description()).contains("discarding");
+        assertThat(action.committed()).as("a finished discard IS a committed update").isTrue();
         assertThat(scalar("SELECT brand_name FROM cd_drug_product")).isEqualTo("NEW-AMOXICILLIN");
         assertThat(swap.listBackupTables()).isEmpty();
         assertThat(swap.readState()).isNull();
@@ -260,7 +263,7 @@ class DpdTableSwapTest {
         swap.markDiscarding();
 
         assertThat(swap.readState()).isEqualTo(DpdTableSwap.STATE_DISCARD);
-        assertThat(swap.recoverInterruptedSwap()).contains("discarding");
+        assertThat(swap.recoverInterruptedSwap().description()).contains("discarding");
         assertThat(swap.readState()).isNull();
     }
 
@@ -420,7 +423,8 @@ class DpdTableSwapTest {
     void shouldDoNothing_whenNoBackupPresent() throws SQLException {
         assertThat(swap.restoreBackupTables()).isZero();
         assertThat(scalar("SELECT brand_name FROM cd_drug_product")).isEqualTo("OLD-AMOXICILLIN");
-        assertThat(swap.recoverInterruptedSwap()).isEqualTo("nothing to recover");
+        assertThat(swap.recoverInterruptedSwap())
+                .isEqualTo(new DpdTableSwap.SwapRecovery(false, "nothing to recover"));
     }
 
     private boolean exists(String table) throws SQLException {

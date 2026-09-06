@@ -16,7 +16,6 @@
  */
 package io.github.carlos_emr.drugref2026.util;
 
-import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -88,7 +87,6 @@ class RxUpdateDBWorkerGateTest {
     @Test
     @DisplayName("should accept a genuinely small extract rather than second-guess Health Canada")
     void shouldAcceptAGenuinelySmallExtract_withOneRowPerTable() {
-        assertThat(1L).isPositive();
         assertThatCode(() -> RxUpdateDBWorker.requireNonEmptyRebuild(counts(1L, 1L)))
                 .doesNotThrowAnyException();
     }
