@@ -141,7 +141,22 @@ public final class DpdTableSwap {
      * still the only copy of the data.
      */
     public void backupLiveTables() throws SQLException {
-        recoverInterruptedSwap();
+        SwapRecovery recovery = recoverInterruptedSwap();
+        // Checking the post-condition rather than trusting the recovery's own word for it:
+        // whatever it did, a new swap may only start from a clean slate. The case that makes
+        // this necessary is a DISCARD whose cleanup failed. recoverInterruptedSwap() reports
+        // that as committed (correctly -- the new data is live), but clearState() is the last
+        // statement in discardBackupTables(), so the marker is still DISCARD and stale *_prev
+        // tables remain. Proceeding would call openState() and relabel that stale set as a
+        // BACKUP set; if the rename loop then failed on the same table the drop failed on, the
+        // restore would put those OLD tables back over the NEW live data -- the exact splice
+        // the marker exists to prevent, arrived at through the marker itself.
+        if (readState() != null || !listBackupTables().isEmpty()) {
+            throw new SQLException("DrugRef: refusing to start a database update while the"
+                    + " previous one is unresolved (" + recovery.description() + "). The live"
+                    + " drug tables are intact and in use; clear the leftover " + BACKUP_SUFFIX
+                    + " tables and the " + STATE_TABLE + " marker by hand, then retry.");
+        }
         try (Connection con = connect(); Statement st = con.createStatement()) {
             // The marker goes in BEFORE the first rename: a rename loop that fails
             // halfway must still be recognisable as an interrupted backup, or the

@@ -89,6 +89,10 @@ public class RxUpdateDBWorker extends Thread{
         DpdTableSwap swap = new DpdTableSwap();
         DpdDownloader.DpdArchives archives = null;
         boolean previousDatasetMovedAside = false;
+        // Whether THIS run reached the commit point. A DISCARD marker alone does not mean this
+        // run committed -- a previous run whose cleanup failed leaves one behind -- and reading
+        // it that way would report a run that imported nothing as a success.
+        boolean commitAttempted = false;
         long startedAt = System.currentTimeMillis();
         try {
             // Set the global flag so other threads/requests know an update is in progress
@@ -147,6 +151,11 @@ public class RxUpdateDBWorker extends Thread{
             // direction for a drug database.
             status.step("committing the new dataset");
             requireNonEmptyRebuild(hm);
+            // Set BEFORE the call, for the same reason previousDatasetMovedAside is: the whole
+            // point of reading the marker afterwards is that markDiscarding() can commit on the
+            // server and still throw on the way back, so a flag set after it returns would be
+            // false in exactly the case it needs to be true.
+            commitAttempted = true;
             swap.markDiscarding();
             previousDatasetMovedAside = false;
 
@@ -209,7 +218,11 @@ public class RxUpdateDBWorker extends Thread{
                     // cases: BACKUP restores, DISCARD finishes the cleanup, and a failure
                     // before the marker moved still reads BACKUP and restores as before.
                     DpdTableSwap.SwapRecovery recovery = swap.recoverInterruptedSwap();
-                    committedAfterAll = recovery.committed();
+                    // Both halves are required. recovery.committed() alone would treat a stale
+                    // DISCARD left by an earlier run's failed cleanup as this run's success --
+                    // and this run may have failed before importing anything at all, since
+                    // backupLiveTables() refuses to start on top of an unresolved swap.
+                    committedAfterAll = commitAttempted && recovery.committed();
                     reason += " -- " + recovery.description();
                 } catch (Exception restoreFailure) {
                     logger.error("DrugRef: could not restore the previous dataset after the failed update",

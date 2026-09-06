@@ -196,6 +196,30 @@ class DpdTableSwapTest {
     }
 
     @Test
+    void shouldRefuseToStartANewSwap_whenTheDiscardLeftStaleBackups() throws SQLException {
+        // The other half of a best-effort discard. Reporting the update as committed is right,
+        // but the marker is still DISCARD and the stale *_prev tables are still there, so a
+        // new swap must not begin: openState() would relabel that stale set as a BACKUP set,
+        // and a rename loop failing on the same table would restore the OLD data over the NEW.
+        swap.backupLiveTables();
+        try (Statement st = con.createStatement()) {
+            st.execute("CREATE TABLE cd_drug_product (id int primary key, brand_name varchar(200))");
+            st.execute("INSERT INTO cd_drug_product VALUES (1, 'NEW-AMOXICILLIN')");
+            st.execute("UPDATE " + DpdTableSwap.STATE_TABLE + " SET state = '"
+                    + DpdTableSwap.STATE_DISCARD + "'");
+            st.execute("CREATE VIEW blocks_the_drop AS SELECT id FROM cd_drug_product_prev");
+        }
+        assertThat(swap.recoverInterruptedSwap().committed()).isTrue();
+
+        assertThatThrownBy(() -> swap.backupLiveTables())
+                .isInstanceOf(SQLException.class)
+                .hasMessageContaining("refusing to start");
+
+        // and the live dataset is untouched by the refusal
+        assertThat(scalar("SELECT brand_name FROM cd_drug_product")).isEqualTo("NEW-AMOXICILLIN");
+    }
+
+    @Test
     void shouldSettleAnUnresolvedSwap_beforeStartingANewOne() throws SQLException {
         // A *_prev set left by an interrupted backup is the only copy of the data.
         // Starting a fresh swap must restore it first, never drop it as stale.
