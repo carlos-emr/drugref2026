@@ -152,15 +152,22 @@ public final class DpdDownloader {
         File out = File.createTempFile("dpd-", ".zip");
         try {
             HttpURLConnection connection = openConnection(url);
-            int status = connection.getResponseCode();
-            if (status != HttpURLConnection.HTTP_OK) {
-                throw new IOException("HTTP " + status + " fetching " + url);
-            }
-            long expected = connection.getContentLengthLong();
+            long expected;
             long copied;
-            try (InputStream in = connection.getInputStream();
-                 FileOutputStream fos = new FileOutputStream(out)) {
-                copied = IOUtils.copyLarge(in, fos);
+            try {
+                int status = connection.getResponseCode();
+                if (status != HttpURLConnection.HTTP_OK) {
+                    throw new IOException("HTTP " + status + " fetching " + url);
+                }
+                expected = connection.getContentLengthLong();
+                try (InputStream in = connection.getInputStream();
+                     FileOutputStream fos = new FileOutputStream(out)) {
+                    copied = IOUtils.copyLarge(in, fos);
+                }
+            } finally {
+                // Release the socket on every path. An update that fails here is retried
+                // by an operator, and a non-200 left the connection alive until GC.
+                connection.disconnect();
             }
             if (expected >= 0 && copied != expected) {
                 throw new IOException("truncated download of " + url + ": got " + copied

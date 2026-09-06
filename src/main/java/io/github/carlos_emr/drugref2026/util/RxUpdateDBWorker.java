@@ -81,8 +81,9 @@ public class RxUpdateDBWorker extends Thread{
         long startedAt = System.currentTimeMillis();
         try {
             // Set the global flag so other threads/requests know an update is in progress
-            Drugref.UPDATE_DB = true;
-            status.begin();
+            // UPDATE_DB and UpdateStatus.begin() are both set by Drugref.updateDB()
+            // under the class monitor, before this thread starts, so a client polling
+            // the moment updateDB() returns "running" already sees RUNNING.
             logger.info("DrugRef database update started");
 
             // Step 1: fetch everything first. A download failure here costs nothing:
@@ -124,28 +125,35 @@ public class RxUpdateDBWorker extends Thread{
             List<Integer> addedDescriptor = dpdImport.addDescriptorToSearchName();
             List<Integer> addedStrength = dpdImport.addStrengthToBrandName();
 
-            // Step 7: record the update in the History table -- the COMMIT POINT.
-            // It is the last fallible step inside the rollback window and it comes
-            // after every step that can still fail, because the history table is not
-            // swapped: a row written before an abandoned step survived the rollback,
-            // and getLastUpdateTime() then reported a failed attempt as the newest
-            // successful update while the restored data was in fact older.
+            // Step 7: THE COMMIT POINT. Moving the marker to DISCARD is a single atomic
+            // statement, and it is what makes the new dataset the good one -- not the
+            // history row. The order matters and is the opposite of the obvious one:
+            // between the history insert and the marker move there is a window, and a
+            // crash inside it must not be resolvable as "restore the old data", because
+            // the history row would then claim an update that had been rolled back. With
+            // the marker first, a crash in the window leaves the NEW data in place and a
+            // stale timestamp -- correct data with a pessimistic date, which is the safe
+            // direction for a drug database.
+            status.step("committing the new dataset");
+            swap.markDiscarding();
+            previousDatasetMovedAside = false;
+
+            // Step 8: record the update in the History table, which is what
+            // getLastUpdateTime() reports. The history table is not swapped, so this
+            // comes after every step that could still have abandoned the update.
             status.step("recording update history");
             if (!new HistoryUtil().addUpdateHistory()) {
                 throw new IllegalStateException("could not record the update in the history table");
             }
-            // Past this line the new dataset is the good one: a later failure must not
-            // roll it back.
-            previousDatasetMovedAside = false;
 
-            // Step 8: statistics for the admin interface, then let go of the old dataset
+            // Step 9: statistics for the admin interface, then let go of the old dataset
             Drugref.DB_INFO.put("tableRowNum", hm);
             Drugref.DB_INFO.put("timeImportDataMinutes", timeDataImport);
             Drugref.DB_INFO.put("timeImportGenericMinutes", timeGenericImport);
             Drugref.DB_INFO.put("descriptor", addedDescriptor);
             Drugref.DB_INFO.put("strength", addedStrength);
 
-            // Step 9: drop the previous dataset. Best-effort by design: the update is
+            // Step 10: drop the previous dataset. Best-effort by design: the update is
             // already committed, so a failure here leaves harmless *_prev tables that
             // the next start (or the next update) clears, and must not fail the run.
             status.step("discarding the previous dataset");
@@ -163,6 +171,8 @@ public class RxUpdateDBWorker extends Thread{
             status.succeed(summary);
             logger.info("DrugRef database update finished: " + summary);
         } catch (Throwable t) {
+            // Throwable, so that an Error still gets the dataset put back -- but see the
+            // rethrow at the end of this block: a fatal Error is not swallowed.
             // Every failure is reported: the thread used to die on an uncaught exception
             // with UPDATE_DB still true, and clients saw "updating" forever.
             logger.error("DrugRef database update failed during '" + status.getStep() + "'", t);
@@ -179,12 +189,24 @@ public class RxUpdateDBWorker extends Thread{
                 }
             }
             status.fail(reason);
+            if (t instanceof Error) {
+                // OutOfMemoryError and friends mean the JVM is in no state to keep
+                // serving. The rollback above was the best-effort part; the process
+                // must not carry on as though this were an ordinary failed update.
+                // The finally below still runs, so the flag is cleared either way.
+                throw (Error) t;
+            }
         } finally {
             if (archives != null) {
                 archives.deleteAll();
             }
-            // Clear the update flag so the system returns to normal operation
-            Drugref.UPDATE_DB = false;
+            // Clear the update flag so the system returns to normal operation. Under the
+            // same monitor updateDB() uses: the flag is a plain static field, so a clear
+            // outside the lock is not guaranteed to be visible to the next caller, which
+            // would then be told an update is still running.
+            synchronized (Drugref.class) {
+                Drugref.UPDATE_DB = false;
+            }
         }
     }
 

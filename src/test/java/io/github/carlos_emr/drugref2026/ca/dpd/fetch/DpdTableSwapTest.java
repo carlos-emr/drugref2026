@@ -17,6 +17,7 @@
 package io.github.carlos_emr.drugref2026.ca.dpd.fetch;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -94,6 +95,7 @@ class DpdTableSwapTest {
             st.execute("INSERT INTO cd_drug_product VALUES (1, 'NEW-AMOXICILLIN')");
         }
 
+        swap.markDiscarding();
         swap.discardBackupTables();
 
         assertThat(swap.listBackupTables()).isEmpty();
@@ -151,9 +153,8 @@ class DpdTableSwapTest {
             st.execute("INSERT INTO cd_drug_product VALUES (1, 'NEW-AMOXICILLIN')");
             st.execute("CREATE TABLE cd_drug_search (id int primary key, name varchar(200))");
             st.execute("INSERT INTO cd_drug_search VALUES (1, 'NEW-AMOXICILLIN 500MG')");
-            st.execute("DELETE FROM " + DpdTableSwap.STATE_TABLE);
-            st.execute("INSERT INTO " + DpdTableSwap.STATE_TABLE + " VALUES ('"
-                    + DpdTableSwap.STATE_DISCARD + "')");
+            st.execute("UPDATE " + DpdTableSwap.STATE_TABLE + " SET state = '"
+                    + DpdTableSwap.STATE_DISCARD + "'");
             st.execute("DROP TABLE cd_drug_search_prev");
         }
 
@@ -193,8 +194,81 @@ class DpdTableSwapTest {
         swap.backupLiveTables();
         assertThat(swap.readState()).isEqualTo(DpdTableSwap.STATE_BACKUP);
 
+        swap.markDiscarding();
+        assertThat(swap.readState()).isEqualTo(DpdTableSwap.STATE_DISCARD);
+
         swap.discardBackupTables();
         assertThat(swap.readState()).isNull();
+    }
+
+
+    @Test
+    void shouldKeepTheNewDataset_whenTheProcessDiesRightAfterTheCommitMarker() throws SQLException {
+        // The worker moves the marker to DISCARD and only then writes the history row and
+        // drops the backups. This pins the window in between: a crash there must keep the
+        // NEW data, because the marker — not the history row — is what commits an update.
+        swap.backupLiveTables();
+        try (Statement st = con.createStatement()) {
+            st.execute("CREATE TABLE cd_drug_product (id int primary key, brand_name varchar(200))");
+            st.execute("INSERT INTO cd_drug_product VALUES (1, 'NEW-AMOXICILLIN')");
+            st.execute("CREATE TABLE cd_drug_search (id int primary key, name varchar(200))");
+            st.execute("INSERT INTO cd_drug_search VALUES (1, 'NEW-AMOXICILLIN 500MG')");
+        }
+        swap.markDiscarding();
+
+        // ...process dies here; next start:
+        String action = swap.recoverInterruptedSwap();
+
+        assertThat(action).contains("discarding");
+        assertThat(scalar("SELECT brand_name FROM cd_drug_product")).isEqualTo("NEW-AMOXICILLIN");
+        assertThat(swap.listBackupTables()).isEmpty();
+        assertThat(swap.readState()).isNull();
+    }
+
+    @Test
+    void shouldNeverLeaveAnEmptyMarker_whenMovingToDiscard() throws SQLException {
+        // An earlier revision wrote every transition as DELETE + INSERT on an autocommit
+        // connection, so a crash between them left the marker table present but EMPTY —
+        // which the recovery pass read as "no marker" and, with *_prev tables still
+        // around, resolved as an interrupted backup, restoring stale data over a
+        // committed dataset. The transition is now a single UPDATE.
+        swap.backupLiveTables();
+
+        swap.markDiscarding();
+
+        try (Statement st = con.createStatement();
+             ResultSet rs = st.executeQuery("SELECT count(*) FROM " + DpdTableSwap.STATE_TABLE)) {
+            assertThat(rs.next()).isTrue();
+            assertThat(rs.getInt(1)).as("exactly one marker row at all times").isEqualTo(1);
+        }
+        assertThat(swap.readState()).isEqualTo(DpdTableSwap.STATE_DISCARD);
+    }
+
+    @Test
+    void shouldRecordTheCommit_whenNoBackupSetExists() throws SQLException {
+        // An update over an empty DPD schema has nothing to move aside, so no marker was
+        // opened. markDiscarding() must still record the commit rather than no-op.
+        swap.markDiscarding();
+
+        assertThat(swap.readState()).isEqualTo(DpdTableSwap.STATE_DISCARD);
+        assertThat(swap.recoverInterruptedSwap()).contains("discarding");
+        assertThat(swap.readState()).isNull();
+    }
+
+    @Test
+    void shouldRefuseToGuess_whenTheMarkerTableIsEmpty() throws SQLException {
+        // Unreachable from this class (the row is written with the CREATE, and the only
+        // transition is a single UPDATE), so an empty marker means something outside
+        // truncated it. Restoring would revert a committed update and discarding would
+        // destroy the previous dataset, so neither may be chosen silently.
+        swap.backupLiveTables();
+        try (Statement st = con.createStatement()) {
+            st.execute("DELETE FROM " + DpdTableSwap.STATE_TABLE);
+        }
+
+        assertThatThrownBy(() -> swap.recoverInterruptedSwap())
+                .isInstanceOf(SQLException.class)
+                .hasMessageContaining("exists but is empty");
     }
 
     @Test

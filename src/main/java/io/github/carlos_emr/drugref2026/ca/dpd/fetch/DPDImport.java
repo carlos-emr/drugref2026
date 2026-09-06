@@ -411,22 +411,43 @@ public class DPDImport {
     }
 
     /**
-     * Executes a list of native SQL statements in the current transaction.
-     *
-     * <p>Failures propagate, which is what lets the worker roll the update back.
-     * The one exception is {@code CREATE INDEX}: an index that cannot be created
-     * (already present, or a name clash on PostgreSQL where index names are
-     * schema-wide) degrades query speed but not the data, so it is logged and the
-     * import continues.
+     * Executes a list of native SQL statements in the caller's transaction. Any failure
+     * propagates, which is what lets the worker roll the update back.
      */
     private void insertLines(EntityManager entityManager, List<String> sqlLines) {
-
         for (String sql : sqlLines) {
             logger.debug(sql);
-            Query query = entityManager.createNativeQuery(sql);
+            entityManager.createNativeQuery(sql).executeUpdate();
+        }
+    }
+
+    /**
+     * Executes each statement in a transaction of its own, tolerating a failed
+     * {@code CREATE INDEX}.
+     *
+     * <p>An index that cannot be created (already present, or a name clash) costs query
+     * speed but not data, so it should not abandon a completed import. Catching the
+     * exception is not enough on its own, though: after a SQL error the JPA provider can
+     * mark the surrounding transaction rollback-only, so the eventual commit throws and
+     * the "tolerated" failure kills the import anyway. Giving each statement its own
+     * transaction is what actually makes the tolerance work.
+     *
+     * <p>Only index statements are tolerated. Anything else in the list — the
+     * {@code company_code} back-fill that ships alongside them, for one — still
+     * propagates.
+     */
+    private void insertLinesTolerantly(EntityManager entityManager, List<String> sqlLines) {
+        for (String sql : sqlLines) {
+            logger.debug(sql);
+            EntityTransaction tx = entityManager.getTransaction();
+            tx.begin();
             try {
-                query.executeUpdate();
+                entityManager.createNativeQuery(sql).executeUpdate();
+                tx.commit();
             } catch (RuntimeException e) {
+                if (tx.isActive()) {
+                    tx.rollback();
+                }
                 if (sql.trim().toLowerCase(java.util.Locale.ROOT).startsWith("create index")) {
                     logger.warn("DrugRef update: index statement failed, continuing without it: " + sql
                             + " (" + e.getMessage() + ")");
@@ -739,10 +760,9 @@ public class DPDImport {
             insertLines(entityManager, getCreateSearchTables());
             tx.commit();
 
-            // Step 7: Add database indexes to all DPD tables for query performance
-            tx.begin();
-            insertLines(entityManager, addIndexToTables());
-            tx.commit();
+            // Step 7: Add database indexes to all DPD tables for query performance.
+            // One transaction per statement: a failed index must not poison a shared one.
+            insertLinesTolerantly(entityManager, addIndexToTables());
 
             // Step 8: Build the search index from raw DPD data (brand names, generics, ATC, ingredients)
             ConfigureSearchData searchData = new ConfigureSearchData();
@@ -751,9 +771,7 @@ public class DPDImport {
             searchData.importSearchData(entityManager);
 
             // Step 9: Add indexes to the search table for search query performance
-            tx.begin();
-            insertLines(entityManager, addIndexToSearchTable());
-            tx.commit();
+            insertLinesTolerantly(entityManager, addIndexToSearchTable());
 
         } finally {
 

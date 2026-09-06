@@ -137,7 +137,7 @@ public final class DpdTableSwap {
             // The marker goes in BEFORE the first rename: a rename loop that fails
             // halfway must still be recognisable as an interrupted backup, or the
             // half-moved dataset is left with no record of what happened to it.
-            writeState(con, st, STATE_BACKUP);
+            openState(con, st);
             for (String table : SWAPPED_TABLES) {
                 String backup = table + BACKUP_SUFFIX;
                 if (tableExists(con, backup)) {
@@ -182,15 +182,15 @@ public final class DpdTableSwap {
     }
 
     /**
-     * Drops the backup set after a successful import and clears the state marker.
+     * Drops the backup set and clears the state marker.
      *
-     * <p>The marker is moved to {@link #STATE_DISCARD} before the first drop, so an
-     * interruption partway through is repaired by finishing the discard rather than
-     * by restoring the remaining half of a dataset the import already replaced.
+     * <p>{@link #markDiscarding()} must already have run: the marker is what makes this
+     * step resumable, and moving it is the act that commits the new dataset. Calling this
+     * without it would leave a window where a crash restores the dataset the import
+     * replaced.
      */
     public void discardBackupTables() throws SQLException {
         try (Connection con = connect(); Statement st = con.createStatement()) {
-            writeState(con, st, STATE_DISCARD);
             for (String table : SWAPPED_TABLES) {
                 String backup = table + BACKUP_SUFFIX;
                 if (tableExists(con, backup)) {
@@ -247,24 +247,54 @@ public final class DpdTableSwap {
      * from deploying.
      */
     public static void restoreIfInterrupted() {
+        DpdTableSwap swap = new DpdTableSwap();
+        String state;
+        List<String> leftover;
         try {
-            DpdTableSwap swap = new DpdTableSwap();
-            String state = swap.readState();
-            List<String> leftover = swap.listBackupTables();
-            if (state == null && leftover.isEmpty()) {
-                return;
-            }
-            logger.warn("DrugRef: a previous database update did not finish (state=" + state
-                    + ", leftover=" + leftover + "); repairing");
+            state = swap.readState();
+            leftover = swap.listBackupTables();
+        } catch (SQLException | RuntimeException e) {
+            // Cannot tell whether a repair is needed. Hibernate's own schema validation
+            // fails against the same unreachable database moments later, so let the
+            // context fail there with the clearer message rather than pretending the
+            // dataset was checked.
+            logger.error("DrugRef: could not check for an interrupted database update", e);
+            return;
+        }
+        if (state == null && leftover.isEmpty()) {
+            return;
+        }
+        logger.warn("DrugRef: a previous database update did not finish (state=" + state
+                + ", leftover=" + leftover + "); repairing");
+        try {
             logger.warn("DrugRef: " + swap.recoverInterruptedSwap());
         } catch (SQLException | RuntimeException e) {
-            logger.error("DrugRef: could not check for an interrupted database update", e);
+            // A repair was needed and could not be done, so the live tables are the
+            // partial ones the backup set was meant to replace. Refuse to deploy: a
+            // DrugRef that silently answers from a half-built drug table is worse for a
+            // prescriber than one that is plainly unavailable, and CARLOS already renders
+            // an unreachable DrugRef as a banner rather than a broken lookup.
+            logger.error("DrugRef: could not repair the interrupted database update; refusing to start", e);
+            throw new IllegalStateException(
+                    "DrugRef: a previous database update was interrupted and could not be repaired."
+                    + " The live drug tables may be incomplete. Restore the drugref2 database or"
+                    + " reload the drug reference dataset before starting the service.", e);
         }
     }
 
     // --- state marker ------------------------------------------------------
 
-    /** @return the recorded state, or {@code null} when no swap is in flight */
+    /**
+     * @return the recorded state, or {@code null} when the marker table does not exist —
+     *         either no swap is in flight, or the {@code *_prev} set was left by a build
+     *         from before the marker existed, which {@link #recoverInterruptedSwap()}
+     *         treats as {@link #STATE_BACKUP}
+     * @throws SQLException if the marker table exists but holds no row. That is a state
+     *         this class cannot produce — {@link #openState} writes the row as it creates
+     *         the table, and {@link #markDiscarding()} moves it with a single {@code UPDATE}
+     *         — so it means something outside truncated it. Both repairs destroy data when
+     *         applied to the wrong half of a swap, so guessing is worse than stopping.
+     */
     String readState() throws SQLException {
         try (Connection con = connect()) {
             if (!tableExists(con, STATE_TABLE)) {
@@ -272,17 +302,52 @@ public final class DpdTableSwap {
             }
             try (Statement st = con.createStatement();
                  ResultSet rs = st.executeQuery("SELECT state FROM " + STATE_TABLE)) {
-                return rs.next() ? rs.getString(1) : null;
+                if (!rs.next()) {
+                    throw new SQLException("the DrugRef update marker table " + STATE_TABLE
+                            + " exists but is empty, so it is not possible to tell whether the"
+                            + " previous update had been committed. Inspect the " + BACKUP_SUFFIX
+                            + " tables by hand: restoring them reverts a completed update, dropping"
+                            + " them discards the only copy of the previous dataset.");
+                }
+                return rs.getString(1);
             }
         }
     }
 
-    private void writeState(Connection con, Statement st, String state) throws SQLException {
-        if (!tableExists(con, STATE_TABLE)) {
-            st.execute("CREATE TABLE " + STATE_TABLE + " (state varchar(16) NOT NULL)");
+    /**
+     * Opens the marker at {@link #STATE_BACKUP}. Called before the first rename, when no
+     * table has moved yet, so a crash anywhere inside it is harmless: the recovery pass
+     * finds no {@code *_prev} tables and does nothing.
+     */
+    private void openState(Connection con, Statement st) throws SQLException {
+        if (tableExists(con, STATE_TABLE)) {
+            st.execute("DROP TABLE " + STATE_TABLE);
         }
-        st.execute("DELETE FROM " + STATE_TABLE);
-        st.execute("INSERT INTO " + STATE_TABLE + " (state) VALUES ('" + state + "')");
+        st.execute("CREATE TABLE " + STATE_TABLE + " (state varchar(16) NOT NULL)");
+        st.execute("INSERT INTO " + STATE_TABLE + " (state) VALUES ('" + STATE_BACKUP + "')");
+    }
+
+    /**
+     * Moves the marker to {@link #STATE_DISCARD} in ONE statement.
+     *
+     * <p>This is the durable commit point of an update, so it must never be observable as
+     * "no state". An earlier revision wrote every transition as {@code DELETE} followed by
+     * {@code INSERT} on an autocommit connection: a crash between the two left the marker
+     * table present but empty, which the recovery pass read as "no marker" and — with
+     * {@code *_prev} tables still around — treated as an interrupted backup, restoring the
+     * old dataset over a new one that had already been accepted.
+     */
+    public void markDiscarding() throws SQLException {
+        try (Connection con = connect(); Statement st = con.createStatement()) {
+            if (!tableExists(con, STATE_TABLE)) {
+                // No swap is in flight (an update over an empty schema, say). Record the
+                // commit directly rather than leaving no marker at all.
+                st.execute("CREATE TABLE " + STATE_TABLE + " (state varchar(16) NOT NULL)");
+                st.execute("INSERT INTO " + STATE_TABLE + " (state) VALUES ('" + STATE_DISCARD + "')");
+                return;
+            }
+            st.execute("UPDATE " + STATE_TABLE + " SET state = '" + STATE_DISCARD + "'");
+        }
     }
 
     private void clearState(Connection con, Statement st) throws SQLException {

@@ -19,6 +19,7 @@ package io.github.carlos_emr.drugref2026.util;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Hashtable;
+import java.util.Locale;
 
 /**
  * Process-wide record of the most recent database update attempt.
@@ -125,6 +126,9 @@ public final class UpdateStatus {
         if (date == null) {
             return "";
         }
-        return new SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(date);
+        // Locale.ENGLISH: this is an API value with a documented format, not display
+        // text. A server defaulting to e.g. a Thai or Hindi locale would otherwise emit
+        // localized digits or a non-Gregorian year and break every client parsing it.
+        return new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.ENGLISH).format(date);
     }
 }

@@ -76,7 +76,13 @@ public class Drugref {
         public static HashMap<String,Object> DB_INFO=new HashMap<String,Object>();
 
         /** Flag indicating whether a database update is currently in progress. Used to prevent concurrent updates. */
-        public static Boolean UPDATE_DB=false;
+        /**
+         * Set while an update is in progress. {@code volatile} because it is written by
+         * the worker thread and read without the monitor by {@link #getLastUpdateTime()}:
+         * a stale {@code true} there answers "updating" forever, and a stale {@code false}
+         * lets a second update start over the first.
+         */
+        public static volatile boolean UPDATE_DB=false;
 
         private static Logger logger = MiscUtils.getLogger();
         
@@ -227,22 +233,34 @@ public class Drugref {
                     return "updating";
                 }
                 UPDATE_DB = true;
+                // Marked RUNNING here, not in the worker: clients are told to poll
+                // getUpdateStatus() as soon as updateDB() answers "running", and the
+                // worker needs a moment to reach its first statement. Doing it there left
+                // a window in which the poll returned the PREVIOUS run's terminal state --
+                // so a page could report the last update as SUCCEEDED or FAILED while the
+                // new one was in fact starting.
+                UpdateStatus.get().begin();
             }
-            RxUpdateDBWorker worker = new RxUpdateDBWorker();
+
             try {
+                RxUpdateDBWorker worker = new RxUpdateDBWorker();
                 worker.start();
             } catch (Throwable t) {
                 // The flag is cleared in the worker's finally -- which never runs if the
                 // thread was never started (Thread.start() throws OutOfMemoryError when the
                 // JVM cannot create a native thread). Without this the service would report
                 // "updating" until it was restarted, with nothing actually running.
+                // Publish the failure and release the flag together, so a retry that gets
+                // in cannot have its own RUNNING state overwritten by this failure.
                 synchronized (Drugref.class) {
+                    UpdateStatus.get().fail("could not start the update worker: "
+                            + RxUpdateDBWorker.describe(t));
                     UPDATE_DB = false;
                 }
-                UpdateStatus.get().begin();
-                UpdateStatus.get().fail("could not start the update worker: "
-                        + RxUpdateDBWorker.describe(t));
                 logger.error("DrugRef: could not start the update worker", t);
+                if (t instanceof Error) {
+                    throw (Error) t;
+                }
                 return "error";
             }
             return "running";
