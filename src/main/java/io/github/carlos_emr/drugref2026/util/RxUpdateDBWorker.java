@@ -230,6 +230,16 @@ public class RxUpdateDBWorker extends Thread{
                     reason += " -- AND the previous dataset could NOT be restored: "
                             + describe(restoreFailure) + "; reload the drug reference seed";
                 }
+            } else if (commitAttempted) {
+                // The third way into this block, and the one with no marker to read: the flag
+                // is cleared on the line AFTER markDiscarding(), so reaching here with the
+                // commit attempted means that call returned normally and the new dataset is
+                // unambiguously live. What failed was a step past the commit point -- the row
+                // counts going into DB_INFO, or the success message itself. Rare, but the
+                // recovery block above is skipped entirely for it, and without this the run
+                // would be reported as FAILED with the new data live: the same defect as the
+                // marker case, reached by a route that never touches the marker.
+                committedAfterAll = true;
             }
             if (committedAfterAll) {
                 // The marker had already accepted the new dataset, so this is a committed

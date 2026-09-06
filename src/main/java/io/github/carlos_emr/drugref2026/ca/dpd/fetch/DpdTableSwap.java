@@ -205,8 +205,9 @@ public final class DpdTableSwap {
         int restored = 0;
         List<String> orphans = new ArrayList<>();
         List<String> emptied = new ArrayList<>();
+        List<String> moved;
         try (Connection con = connect(); Statement st = con.createStatement()) {
-            List<String> moved = readMovedSet(con);
+            moved = readMovedSet(con);
             for (String table : SWAPPED_TABLES) {
                 String backup = table + BACKUP_SUFFIX;
                 if (!tableExists(con, backup)) {
@@ -236,24 +237,45 @@ public final class DpdTableSwap {
         if (!emptied.isEmpty()) {
             logger.info("DrugRef update: emptied " + emptied + ", which the abandoned import had created");
         }
-        if (!orphans.isEmpty() && restored > 0) {
-            // Not an error, and not silently fine either. See the note above on why these are
-            // left as they are; the operator is the one who can tell which case this is.
-            logger.warn("DrugRef update: " + orphans + " had no " + BACKUP_SUFFIX + " counterpart and"
-                    + " were left as they are. Either the import created them (they now hold rows"
-                    + " from the abandoned run) or the backup never reached them (they hold the"
-                    + " original rows). Check them before relying on drug search.");
-        } else if (!orphans.isEmpty()) {
-            // Nothing was restored, so no rename was ever undone: backupLiveTables() failed on
-            // its first table and the live set was never disturbed. The tables above are
-            // "orphans" only in the bookkeeping sense -- they are the untouched original
-            // dataset. Warning here told operators to distrust a dataset that is provably fine,
-            // which is worse than saying nothing, because the one case the warning exists for
-            // (a partial rename) always leaves something to restore.
-            logger.info("DrugRef update: nothing had been moved aside, so the live drug tables"
-                    + " were never disturbed and are the previous dataset unchanged");
+        if (!orphans.isEmpty()) {
+            if (liveTablesWereNeverDisturbed(restored, moved)) {
+                logger.info("DrugRef update: nothing had been moved aside, so the live drug tables"
+                        + " were never disturbed and are the previous dataset unchanged");
+            } else {
+                logger.warn("DrugRef update: " + orphans + " had no " + BACKUP_SUFFIX + " counterpart"
+                        + " and were left as they are. Either the import created them (they now hold"
+                        + " rows from the abandoned run) or the backup never reached them (they hold"
+                        + " the original rows). Check them before relying on drug search.");
+            }
         }
         return restored;
+    }
+
+    /**
+     * Whether a restore that produced orphans can honestly tell the operator that the live
+     * drug tables are the previous dataset, untouched.
+     *
+     * <p>Both conditions are required, and this is a seam rather than an inline expression
+     * because getting it wrong is silent: the wrong answer is a reassuring log line over data
+     * that is not what it claims, which nobody notices until a prescriber does.
+     *
+     * <ul>
+     *   <li>{@code restored == 0} — no rename was undone.
+     *   <li>{@code moved == null} — and none is recorded either, so
+     *       {@link #backupLiveTables()} failed on its first table and never disturbed the live
+     *       set. Warning here would tell operators to distrust a dataset that is provably fine.
+     * </ul>
+     *
+     * <p>{@code restored == 0} alone is <em>not</em> enough, which is the trap. A non-null
+     * {@code moved} set says the backup provably renamed these tables aside; if their
+     * {@code *_prev} copies are then gone — dropped by a partial discard, or by hand — nothing
+     * is restored and every moved table looks like an orphan, yet what is live is the abandoned
+     * import's data, not the original. That is the one case where "unchanged" would be the
+     * exact opposite of the truth, so it falls through to the warning along with the
+     * genuinely ambiguous partial restore ({@code restored > 0}).
+     */
+    static boolean liveTablesWereNeverDisturbed(int restored, List<String> moved) {
+        return restored == 0 && moved == null;
     }
 
     /**

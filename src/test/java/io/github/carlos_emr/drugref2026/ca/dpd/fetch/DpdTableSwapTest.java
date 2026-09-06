@@ -25,6 +25,7 @@ import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.List;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -193,6 +194,24 @@ class DpdTableSwapTest {
         assertThat(action.committed()).as("a failed cleanup does not un-commit the update").isTrue();
         assertThat(action.description()).contains("could not be dropped");
         assertThat(scalar("SELECT brand_name FROM cd_drug_product")).isEqualTo("NEW-AMOXICILLIN");
+    }
+
+    @Test
+    void shouldNotCallTheDatasetUndisturbed_whenAMovedSetWasRecorded() {
+        // restored == 0 alone is NOT enough to reassure. A recorded moved set says the backup
+        // provably renamed those tables aside; if their *_prev copies are then gone (a partial
+        // discard, or a hand cleanup), nothing restores and every moved table looks like an
+        // orphan -- but what is live is the abandoned import's data, not the original. Calling
+        // that "unchanged" would be the exact opposite of the truth.
+        assertThat(DpdTableSwap.liveTablesWereNeverDisturbed(0, List.of("cd_drug_product")))
+                .as("backups were destroyed, so the live tables are the import's").isFalse();
+        assertThat(DpdTableSwap.liveTablesWereNeverDisturbed(0, List.of()))
+                .as("a completed backup that moved nothing is still evidence the loop ran").isFalse();
+        assertThat(DpdTableSwap.liveTablesWereNeverDisturbed(2, null))
+                .as("a partial restore is the ambiguous case the warning exists for").isFalse();
+
+        // The only reassurable case: nothing undone, and no rename recorded either.
+        assertThat(DpdTableSwap.liveTablesWereNeverDisturbed(0, null)).isTrue();
     }
 
     @Test
