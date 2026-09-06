@@ -226,12 +226,20 @@ class DpdTableSwapTest {
     }
 
     @Test
-    void shouldNeverLeaveAnEmptyMarker_whenMovingToDiscard() throws SQLException {
-        // An earlier revision wrote every transition as DELETE + INSERT on an autocommit
-        // connection, so a crash between them left the marker table present but EMPTY —
-        // which the recovery pass read as "no marker" and, with *_prev tables still
-        // around, resolved as an interrupted backup, restoring stale data over a
-        // committed dataset. The transition is now a single UPDATE.
+    void shouldHoldExactlyOneMarkerRow_afterMovingToDiscard() throws SQLException {
+        // Renamed from shouldNeverLeaveAnEmptyMarker_whenMovingToDiscard, which promised more
+        // than it delivers. "Never leaves an empty marker" is a statement about the window
+        // *inside* markDiscarding(), and this test only looks at the state after it returns —
+        // which a DELETE + INSERT implementation satisfies identically. The crash-window
+        // property comes from the transition being a single UPDATE, which is structural and
+        // reviewable in the source, not observable from JDBC without instrumenting the driver.
+        //
+        // Why it matters, and why the single UPDATE is there: an earlier revision wrote every
+        // transition as DELETE + INSERT on an autocommit connection, so a crash between them
+        // left the marker present but EMPTY — which the recovery pass read as "no marker" and,
+        // with *_prev tables still around, resolved as an interrupted backup, restoring stale
+        // data over a committed dataset. What this test does pin is the post-condition that
+        // makes that resolvable at all: exactly one row, holding DISCARD.
         swap.backupLiveTables();
 
         swap.markDiscarding();

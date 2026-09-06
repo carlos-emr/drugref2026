@@ -58,7 +58,11 @@ import io.github.carlos_emr.drugref2026.ca.dpd.history.HistoryUtil;
  * the two must leave the NEW data in place with a stale timestamp rather than a history row
  * claiming an update that had been rolled back. So a history failure does <em>not</em> restore
  * anything — the dataset is already committed and the run reports the failure with the new data
- * live. The outcome, success or failure with its reason, is recorded in {@link UpdateStatus} for
+ * live. Nothing after the marker can fail the run: the history row and the {@code *_prev} drop
+ * are both best-effort and report themselves in the success message instead. That keeps a
+ * {@code FAILED} status meaning exactly one thing — the update was abandoned and the previous
+ * dataset is what prescribers are searching — which is what the admin page tells the operator.
+ * The outcome, success or failure with its reason, is recorded in {@link UpdateStatus} for
  * {@link Drugref#getUpdateStatus()}.
  *
  * <p>The {@link Drugref#UPDATE_DB} flag is set for the duration of the update to prevent
@@ -149,9 +153,30 @@ public class RxUpdateDBWorker extends Thread{
             // Step 8: record the update in the History table, which is what
             // getLastUpdateTime() reports. The history table is not swapped, so this
             // comes after every step that could still have abandoned the update.
+            //
+            // Best-effort, and it must be: the marker moved a moment ago, so the new dataset
+            // IS the live one and there is nothing left to roll back. Throwing here used to
+            // report the run as FAILED, which the admin page renders as "the previous drug
+            // data was kept" -- a statement that is false past the commit point, and the
+            // worst kind of false, because it tells the operator to expect the old data
+            // while the new data is what prescribers are searching. A missing history row
+            // costs a stale "last updated" date on correct data, which is the pessimistic
+            // direction the commit ordering was chosen for in the first place.
             status.step("recording update history");
-            if (!new HistoryUtil().addUpdateHistory()) {
-                throw new IllegalStateException("could not record the update in the history table");
+            String historyCaveat = "";
+            try {
+                if (!new HistoryUtil().addUpdateHistory()) {
+                    historyCaveat = "; the update history row could NOT be written, so the"
+                            + " reported \"last updated\" date stays at the previous run";
+                }
+            } catch (RuntimeException e) {
+                logger.warn("DrugRef update: the new dataset is committed but the history row"
+                        + " could not be written; the reported last-update date will be stale", e);
+                historyCaveat = "; the update history row could NOT be written (" + describe(e)
+                        + "), so the reported \"last updated\" date stays at the previous run";
+            }
+            if (!historyCaveat.isEmpty()) {
+                logger.warn("DrugRef update: committed, but the history row was not written");
             }
 
             // Step 9: statistics for the admin interface, then let go of the old dataset
@@ -175,7 +200,7 @@ public class RxUpdateDBWorker extends Thread{
 
             long minutes = (System.currentTimeMillis() - startedAt) / 60000L;
             String summary = "updated in " + minutes + " min; " + hm.get("CdDrugProduct") + " products, "
-                    + hm.get("CdDrugSearch") + " search entries";
+                    + hm.get("CdDrugSearch") + " search entries" + historyCaveat;
             status.succeed(summary);
             logger.info("DrugRef database update finished: " + summary);
         } catch (Throwable t) {

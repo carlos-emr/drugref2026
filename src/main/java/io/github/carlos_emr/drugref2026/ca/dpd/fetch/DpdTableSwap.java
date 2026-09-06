@@ -155,18 +155,38 @@ public final class DpdTableSwap {
      * Puts the backup set back under the live names, dropping whatever partial
      * tables the failed import left behind, and clears the state marker.
      *
-     * <p>A live table that has no {@code *_prev} counterpart is left alone: it is
-     * a table the importer created that had no previous version, and dropping it
-     * could leave the schema missing a table Hibernate validates at startup.
+     * <p>A live table that has no {@code *_prev} counterpart is left alone, and that is a
+     * deliberate choice between two bad outcomes rather than an oversight. Such a table is
+     * one of two things, and this method cannot tell which:
+     * <ul>
+     *   <li>a table the importer created that had no previous version — leaving it keeps the
+     *       abandoned import's rows beside the restored dataset;</li>
+     *   <li>a table {@link #backupLiveTables()} never got to, because the rename loop failed
+     *       partway — in which case it still holds the <em>original</em> rows, untouched.</li>
+     * </ul>
+     * Emptying it would restore the first case exactly and destroy real data in the second,
+     * and the second is the more likely of the two (a rename loop dying partway needs only a
+     * lock timeout, while the first needs a schema that predates one of these tables). So the
+     * rows are left and the situation is logged: an orphan is visible to the operator rather
+     * than silently resolved in the direction that can lose data.
+     *
+     * <p>The principled fix is for {@link #backupLiveTables()} to record which tables it
+     * actually moved, which turns the guess into a fact and makes both cases exact. That is a
+     * change to the marker's shape and belongs with a run of the full repair matrix against
+     * MariaDB, not with this one.
      *
      * @return the number of tables restored
      */
     public int restoreBackupTables() throws SQLException {
         int restored = 0;
+        List<String> orphans = new ArrayList<>();
         try (Connection con = connect(); Statement st = con.createStatement()) {
             for (String table : SWAPPED_TABLES) {
                 String backup = table + BACKUP_SUFFIX;
                 if (!tableExists(con, backup)) {
+                    if (tableExists(con, table)) {
+                        orphans.add(table);
+                    }
                     continue;
                 }
                 if (tableExists(con, table)) {
@@ -178,6 +198,14 @@ public final class DpdTableSwap {
             clearState(con, st);
         }
         logger.info("DrugRef update: restored " + restored + " table(s) from the " + BACKUP_SUFFIX + " set");
+        if (!orphans.isEmpty()) {
+            // Not an error, and not silently fine either. See the note above on why these are
+            // left as they are; the operator is the one who can tell which case this is.
+            logger.warn("DrugRef update: " + orphans + " had no " + BACKUP_SUFFIX + " counterpart and"
+                    + " were left as they are. Either the import created them (they now hold rows"
+                    + " from the abandoned run) or the backup never reached them (they hold the"
+                    + " original rows). Check them before relying on drug search.");
+        }
         return restored;
     }
 

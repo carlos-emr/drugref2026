@@ -22,6 +22,13 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
@@ -90,6 +97,36 @@ class DpdDownloaderTest {
         assertThat(archives.getActive()).doesNotExist();
         assertThat(archives.getInactiveDetail()).doesNotExist();
         assertThat(archives.getInactiveTable()).doesNotExist();
+    }
+
+    @Test
+    void shouldDeleteTheArchivesItAlreadyFetched_whenALaterOneFails() throws IOException {
+        // download()'s @throws promises "archives already fetched are deleted before the
+        // exception is thrown, so a failure leaves nothing behind", and the class comment above
+        // says a failure must leave no temp files behind. Nothing asserted it. A rebuild that
+        // fails on the third archive would otherwise strand two multi-hundred-megabyte files in
+        // the temp directory on every retry — on the appliance, that is the disk the EMR shares.
+        files.put(DpdDownloader.ACTIVE_ARCHIVE, zip("drug.txt"));
+        files.put(DpdDownloader.INACTIVE_DETAIL_ARCHIVE, zip("drug_ia.txt"));
+        // INACTIVE_TABLE_ARCHIVE absent -> the third fetch 404s, after two have landed.
+        Set<Path> before = tempArchives();
+
+        assertThatThrownBy(() -> DpdDownloader.download(baseUrl)).isInstanceOf(IOException.class);
+
+        Set<Path> leaked = tempArchives();
+        leaked.removeAll(before);
+        assertThat(leaked).as("temp archives left behind by a failed download").isEmpty();
+    }
+
+    /** The dpd-*.zip temp files currently on disk, so a test can diff its own leaks. */
+    private static Set<Path> tempArchives() throws IOException {
+        Path tmp = Paths.get(System.getProperty("java.io.tmpdir"));
+        try (Stream<Path> files = Files.list(tmp)) {
+            return files.filter(p -> {
+                String n = p.getFileName().toString();
+                return n.startsWith("dpd-") && n.endsWith(".zip");
+            }).collect(Collectors.toCollection(HashSet::new));
+        }
     }
 
     @Test
