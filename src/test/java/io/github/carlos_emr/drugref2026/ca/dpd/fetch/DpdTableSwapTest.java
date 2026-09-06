@@ -171,6 +171,31 @@ class DpdTableSwapTest {
     }
 
     @Test
+    void shouldStillReportCommitted_whenTheDiscardItselfFails() throws SQLException {
+        // Past the marker the new dataset is live, so a DROP that fails cannot un-commit it --
+        // the worst it leaves is a stale *_prev set the next start clears. Letting the failure
+        // out would escape before committed=true is returned, and the worker would report a
+        // committed update as FAILED while telling the operator to reload the drug reference
+        // seed over data that is correct and live. That is the exact bug the flag exists for.
+        swap.backupLiveTables();
+        try (Statement st = con.createStatement()) {
+            st.execute("CREATE TABLE cd_drug_product (id int primary key, brand_name varchar(200))");
+            st.execute("INSERT INTO cd_drug_product VALUES (1, 'NEW-AMOXICILLIN')");
+            st.execute("UPDATE " + DpdTableSwap.STATE_TABLE + " SET state = '"
+                    + DpdTableSwap.STATE_DISCARD + "'");
+            // A dependent view makes the DROP of this backup fail, the way a lock or a
+            // permission problem would on MariaDB.
+            st.execute("CREATE VIEW blocks_the_drop AS SELECT id FROM cd_drug_product_prev");
+        }
+
+        DpdTableSwap.SwapRecovery action = swap.recoverInterruptedSwap();
+
+        assertThat(action.committed()).as("a failed cleanup does not un-commit the update").isTrue();
+        assertThat(action.description()).contains("could not be dropped");
+        assertThat(scalar("SELECT brand_name FROM cd_drug_product")).isEqualTo("NEW-AMOXICILLIN");
+    }
+
+    @Test
     void shouldSettleAnUnresolvedSwap_beforeStartingANewOne() throws SQLException {
         // A *_prev set left by an interrupted backup is the only copy of the data.
         // Starting a fresh swap must restore it first, never drop it as stale.

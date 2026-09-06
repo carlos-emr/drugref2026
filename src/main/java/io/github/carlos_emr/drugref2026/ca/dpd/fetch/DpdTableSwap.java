@@ -285,7 +285,9 @@ public final class DpdTableSwap {
      * is what a build predating the marker leaves) means the import never completed:
      * the previous dataset is restored. {@link #STATE_DISCARD} means the import was
      * accepted and only the cleanup was interrupted: the discard is finished, because
-     * restoring here would mix the old dataset into the new one.
+     * restoring here would mix the old dataset into the new one. A discard that fails is
+     * still reported as committed — the marker already made the new dataset live, and a
+     * leftover {@code *_prev} set is cleared on the next start.
      *
      * @return what was found and done, including whether the new dataset had been committed
      */
@@ -296,9 +298,26 @@ public final class DpdTableSwap {
             return new SwapRecovery(false, "nothing to recover");
         }
         if (STATE_DISCARD.equals(state)) {
-            discardBackupTables();
-            return new SwapRecovery(true,
-                    "finished discarding the previous dataset (" + leftover.size() + " table(s))");
+            // Best-effort, and the try/catch is load-bearing rather than defensive. Past the
+            // marker the new dataset IS the live one, so nothing here can un-commit it: the
+            // worst a failed DROP leaves is a stale *_prev set the next start clears. Letting
+            // the exception out instead would escape before committed=true is ever returned,
+            // and the caller would report a committed update as FAILED -- the very thing this
+            // return value was added to prevent -- while telling the operator to reload the
+            // drug reference seed over data that is correct and live.
+            try {
+                discardBackupTables();
+                return new SwapRecovery(true,
+                        "finished discarding the previous dataset (" + leftover.size() + " table(s))");
+            } catch (SQLException | RuntimeException e) {
+                logger.warn("DrugRef: the new dataset is committed but the previous one could not be"
+                        + " dropped; the " + BACKUP_SUFFIX + " tables will be cleared on the next"
+                        + " start", e);
+                return new SwapRecovery(true,
+                        "the new dataset is committed and live, but the previous one could not be"
+                        + " dropped (" + e + "); the " + BACKUP_SUFFIX + " tables will be cleared"
+                        + " on the next start");
+            }
         }
         int restored = restoreBackupTables();
         return new SwapRecovery(false, "restored the previous dataset (" + restored + " table(s))");
