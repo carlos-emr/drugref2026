@@ -1815,6 +1815,10 @@ public class TablesDao {
         Vector vec = new Vector();
         Hashtable ha = new Hashtable();
         Vector missing = new Vector();
+        // Allergies that were checked and did not match. They are reported by being in neither
+        // returned list, so nothing else records them, and a later failure would otherwise
+        // downgrade a real "checked and clear" answer to "never checked".
+        Vector cleared = new Vector();
 
         if (atcCode == null || atcCode.matches("") || atcCode.matches("null")) {
             ha.put("warnings", results);
@@ -1838,32 +1842,36 @@ public class TablesDao {
                 }
                 aDesc = aDesc.trim();
 
-                // A free-text allergen names no category, so ask the reference which categories
-                // carry that name and check the drug against each of them. A typed allergen is
-                // checked as exactly the one category it declares.
-                List<Integer> categories;
-                if (isFreeTextAllergyType(aType)) {
-                    categories = resolveFreeTextAllergenCategories(em, aDesc);
-                    if (categories.isEmpty()) {
-                        logger.debug("free-text allergen '" + aDesc + "' is not a name this reference knows; not checked");
-                        missing.add(aId);
-                        continue;
-                    }
-                    logger.debug("free-text allergen '" + aDesc + "' resolved to categories " + categories);
-                } else {
-                    categories = new ArrayList<Integer>();
-                    try {
-                        categories.add(Integer.valueOf(aType.trim()));
-                    } catch (NumberFormatException nfe) {
-                        logger.debug("allergy id " + aId + " has unparseable type '" + aType + "'; not checked");
-                        missing.add(aId);
-                        continue;
-                    }
-                }
-
                 boolean warned = false;
                 boolean resolvedAny = false;
+                // Everything that touches the database for THIS allergy sits inside one handler,
+                // resolution included: a failure while resolving is as much this allergy's problem
+                // as a failure while matching, and letting it escape would abandon every allergy
+                // after it in the list.
                 try {
+                    // A free-text allergen names no category, so ask the reference which categories
+                    // carry that name and check the drug against each of them. A typed allergen is
+                    // checked as exactly the one category it declares.
+                    List<Integer> categories;
+                    if (isFreeTextAllergyType(aType)) {
+                        categories = resolveFreeTextAllergenCategories(em, aDesc);
+                        if (categories.isEmpty()) {
+                            logger.debug("free-text allergen '" + aDesc + "' is not a name this reference knows; not checked");
+                            missing.add(aId);
+                            continue;
+                        }
+                        logger.debug("free-text allergen '" + aDesc + "' resolved to categories " + categories);
+                    } else {
+                        categories = new ArrayList<Integer>();
+                        try {
+                            categories.add(Integer.valueOf(aType.trim()));
+                        } catch (NumberFormatException nfe) {
+                            logger.debug("allergy id " + aId + " has unparseable type '" + aType + "'; not checked");
+                            missing.add(aId);
+                            continue;
+                        }
+                    }
+
                     for (Integer category : categories) {
                         if (category == null) {
                             continue;
@@ -1896,7 +1904,11 @@ public class TablesDao {
                 } else if (!resolvedAny) {
                     missing.add(aId);
                 } else {
+                    // Checked against the reference and not a match. That verdict is carried by
+                    // absence from both lists, so it has to be remembered separately or a later
+                    // failure would relabel it as never checked.
                     logger.debug(atcCode + " is NOT in allergy group " + aDesc);
+                    cleared.add(aId);
                 }
             }
         } catch (Exception e) {
@@ -1905,7 +1917,7 @@ public class TablesDao {
             // not reach a verdict as "missing": an empty response here is indistinguishable from a
             // completed check that found nothing, which is the failure this method exists to avoid.
             logger.error("getAllergyWarnings failed for atcCode=" + atcCode, e);
-            markUncheckedAsMissing(allergies, results, missing);
+            markUncheckedAsMissing(allergies, results, missing, cleared);
         } finally {
             JpaUtils.close(em);
         }
@@ -1923,8 +1935,9 @@ public class TablesDao {
      * @param allergies the caller's allergy list, each entry a Hashtable carrying an "id"
      * @param results the ids already warned on
      * @param missing the ids already known to be unchecked; extended in place
+     * @param cleared the ids that were checked and did not match, which must not be relabelled
      */
-    private void markUncheckedAsMissing(Vector allergies, Vector results, Vector missing) {
+    private void markUncheckedAsMissing(Vector allergies, Vector results, Vector missing, Vector cleared) {
         if (allergies == null) {
             return;
         }
@@ -1935,7 +1948,7 @@ public class TablesDao {
                 continue;
             }
             Object aId = ((Hashtable) element).get("id");
-            if (aId != null && !results.contains(aId) && !missing.contains(aId)) {
+            if (aId != null && !results.contains(aId) && !missing.contains(aId) && !cleared.contains(aId)) {
                 missing.add(aId);
             }
         }
