@@ -289,11 +289,10 @@ public final class DpdTableSwap {
      *         either no swap is in flight, or the {@code *_prev} set was left by a build
      *         from before the marker existed, which {@link #recoverInterruptedSwap()}
      *         treats as {@link #STATE_BACKUP}
-     * @throws SQLException if the marker table exists but holds no row. That is a state
-     *         this class cannot produce — {@link #openState} writes the row as it creates
-     *         the table, and {@link #markDiscarding()} moves it with a single {@code UPDATE}
-     *         — so it means something outside truncated it. Both repairs destroy data when
-     *         applied to the wrong half of a swap, so guessing is worse than stopping.
+     * @throws SQLException if the marker table exists, holds no row, AND a {@code *_prev}
+     *         set is present. Then the marker was the only record of which half of a swap
+     *         the process died in, and both repairs destroy data when applied to the wrong
+     *         half, so guessing is worse than stopping.
      */
     String readState() throws SQLException {
         try (Connection con = connect()) {
@@ -303,11 +302,7 @@ public final class DpdTableSwap {
             try (Statement st = con.createStatement();
                  ResultSet rs = st.executeQuery("SELECT state FROM " + STATE_TABLE)) {
                 if (!rs.next()) {
-                    throw new SQLException("the DrugRef update marker table " + STATE_TABLE
-                            + " exists but is empty, so it is not possible to tell whether the"
-                            + " previous update had been committed. Inspect the " + BACKUP_SUFFIX
-                            + " tables by hand: restoring them reverts a completed update, dropping"
-                            + " them discards the only copy of the previous dataset.");
+                    return resolveEmptyMarker(con, st);
                 }
                 return rs.getString(1);
             }
@@ -315,9 +310,48 @@ public final class DpdTableSwap {
     }
 
     /**
+     * Decides what an empty marker table means, by looking at whether any dataset was
+     * actually moved aside.
+     *
+     * <p>DDL is not transactional on MariaDB, so the marker cannot be created and
+     * populated as one atomic act: {@code CREATE TABLE} commits on its own and the
+     * {@code INSERT} that follows is a separate statement. A process killed between the
+     * two leaves the table present and empty. {@link #openState} runs before the first
+     * rename and {@link #markDiscarding()}'s create branch runs only when no swap is in
+     * flight, so in both cases there is nothing moved aside to be ambiguous about — the
+     * marker is meaningless and is cleared here.
+     *
+     * <p>An earlier revision threw unconditionally, which made that harmless crash
+     * permanent: {@link #backupLiveTables()} settles any unfinished swap first, so it read
+     * the marker and failed, and every subsequent update failed the same way until someone
+     * dropped the table by hand.
+     *
+     * <p>With a {@code *_prev} set present the marker was load-bearing and something
+     * outside this class truncated it. That stays an error.
+     */
+    private String resolveEmptyMarker(Connection con, Statement st) throws SQLException {
+        for (String table : SWAPPED_TABLES) {
+            if (tableExists(con, table + BACKUP_SUFFIX)) {
+                throw new SQLException("the DrugRef update marker table " + STATE_TABLE
+                        + " exists but is empty, so it is not possible to tell whether the"
+                        + " previous update had been committed. Inspect the " + BACKUP_SUFFIX
+                        + " tables by hand: restoring them reverts a completed update, dropping"
+                        + " them discards the only copy of the previous dataset.");
+            }
+        }
+        logger.warn("DrugRef: the update marker table " + STATE_TABLE + " was left empty by an"
+                + " interrupted start, and no " + BACKUP_SUFFIX + " tables exist, so no dataset"
+                + " was moved aside; clearing it");
+        st.execute("DROP TABLE " + STATE_TABLE);
+        return null;
+    }
+
+    /**
      * Opens the marker at {@link #STATE_BACKUP}. Called before the first rename, when no
-     * table has moved yet, so a crash anywhere inside it is harmless: the recovery pass
-     * finds no {@code *_prev} tables and does nothing.
+     * table has moved yet. A crash between the {@code CREATE} and the {@code INSERT}
+     * leaves the marker table empty — DDL commits on its own here, so the two cannot be
+     * made atomic — and {@link #resolveEmptyMarker} clears it on the next pass, having
+     * confirmed no {@code *_prev} set exists to be ambiguous about.
      */
     private void openState(Connection con, Statement st) throws SQLException {
         if (tableExists(con, STATE_TABLE)) {

@@ -179,8 +179,16 @@ public class RxUpdateDBWorker extends Thread{
             String reason = "failed during '" + status.getStep() + "': " + describe(t);
             if (previousDatasetMovedAside) {
                 try {
-                    int restored = swap.restoreBackupTables();
-                    reason += " -- previous dataset restored (" + restored + " tables)";
+                    // recoverInterruptedSwap(), not restoreBackupTables(): the marker
+                    // decides, not this flag. markDiscarding() can commit on the server and
+                    // still throw on the way back (the connection dropping after the UPDATE
+                    // lands is enough), and the flag is only cleared once the call returns
+                    // normally. A blind restore in that window put the previous dataset back
+                    // over one the marker had already accepted -- the exact splice the
+                    // commit point exists to prevent. Reading the marker resolves all three
+                    // cases: BACKUP restores, DISCARD finishes the cleanup, and a failure
+                    // before the marker moved still reads BACKUP and restores as before.
+                    reason += " -- " + swap.recoverInterruptedSwap();
                 } catch (Exception restoreFailure) {
                     logger.error("DrugRef: could not restore the previous dataset after the failed update",
                             restoreFailure);
@@ -200,10 +208,11 @@ public class RxUpdateDBWorker extends Thread{
             if (archives != null) {
                 archives.deleteAll();
             }
-            // Clear the update flag so the system returns to normal operation. Under the
-            // same monitor updateDB() uses: the flag is a plain static field, so a clear
-            // outside the lock is not guaranteed to be visible to the next caller, which
-            // would then be told an update is still running.
+            // Clear the update flag so the system returns to normal operation. UPDATE_DB is
+            // volatile, so a reader outside the lock sees this write regardless; the monitor
+            // is here because updateDB() tests the flag and starts a worker under it, and
+            // this clear has to be serialized against that check-then-act or a retry racing
+            // the end of this run could start a second worker.
             synchronized (Drugref.class) {
                 Drugref.UPDATE_DB = false;
             }

@@ -272,6 +272,37 @@ class DpdTableSwapTest {
     }
 
     @Test
+    void shouldClearTheMarker_whenItIsEmptyAndNothingWasMovedAside() throws SQLException {
+        // The crash openState() can actually leave: DDL commits on its own, so a process
+        // killed between the CREATE and the INSERT leaves the marker table present and
+        // empty -- but before any rename, so no dataset is ambiguous. This used to be
+        // permanent: backupLiveTables() settles an unfinished swap first, so it read the
+        // marker, threw, and every later update threw the same way.
+        try (Statement st = con.createStatement()) {
+            st.execute("CREATE TABLE " + DpdTableSwap.STATE_TABLE + " (state varchar(16) NOT NULL)");
+        }
+
+        assertThat(swap.readState()).isNull();
+        assertThat(exists(DpdTableSwap.STATE_TABLE)).isFalse();
+    }
+
+    @Test
+    void shouldStillRunTheNextUpdate_afterAnEmptyMarkerWasLeftBehind() throws SQLException {
+        try (Statement st = con.createStatement()) {
+            st.execute("CREATE TABLE " + DpdTableSwap.STATE_TABLE + " (state varchar(16) NOT NULL)");
+        }
+
+        swap.backupLiveTables();
+
+        assertThat(exists("cd_drug_product_prev")).isTrue();
+        assertThat(swap.readState()).isEqualTo(DpdTableSwap.STATE_BACKUP);
+        // Two, not three: `history` is deliberately outside the swap set, because it is
+        // what getLastUpdateTime() reads and must survive a rolled-back update.
+        assertThat(swap.restoreBackupTables()).isEqualTo(2);
+        assertThat(scalar("SELECT brand_name FROM cd_drug_product")).isEqualTo("OLD-AMOXICILLIN");
+    }
+
+    @Test
     void shouldDoNothing_whenNoBackupPresent() throws SQLException {
         assertThat(swap.restoreBackupTables()).isZero();
         assertThat(scalar("SELECT brand_name FROM cd_drug_product")).isEqualTo("OLD-AMOXICILLIN");
