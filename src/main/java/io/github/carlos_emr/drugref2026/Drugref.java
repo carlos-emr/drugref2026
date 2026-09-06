@@ -215,7 +215,8 @@ public class Drugref {
          * Only one update can run at a time; if an update is already in progress,
          * returns "updating" without starting a new one.
          *
-         * @return "running" if a new update was started, or "updating" if one is already in progress
+         * @return "running" if a new update was started, "updating" if one is already in
+         *         progress, or "error" if the worker thread could not be started
          */
         public String updateDB(){
             // Guarded by the class monitor and the flag set here rather than in the
@@ -228,7 +229,22 @@ public class Drugref {
                 UPDATE_DB = true;
             }
             RxUpdateDBWorker worker = new RxUpdateDBWorker();
-            worker.start();
+            try {
+                worker.start();
+            } catch (Throwable t) {
+                // The flag is cleared in the worker's finally -- which never runs if the
+                // thread was never started (Thread.start() throws OutOfMemoryError when the
+                // JVM cannot create a native thread). Without this the service would report
+                // "updating" until it was restarted, with nothing actually running.
+                synchronized (Drugref.class) {
+                    UPDATE_DB = false;
+                }
+                UpdateStatus.get().begin();
+                UpdateStatus.get().fail("could not start the update worker: "
+                        + RxUpdateDBWorker.describe(t));
+                logger.error("DrugRef: could not start the update worker", t);
+                return "error";
+            }
             return "running";
         }
 

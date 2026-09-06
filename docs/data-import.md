@@ -72,13 +72,27 @@ The earlier pipeline dropped every table first and opened each URL with a bare
 `URL.openStream()` whose failure was swallowed; a server that could not reach
 Health Canada was left with an empty drug database.
 
-### Step 0b: Table swap (`DpdTableSwap.backupLiveTables()`)
+### Step 0b: Table swap (`DpdTableSwap.backupLiveTables()`) — MySQL/MariaDB only
 
 Every table the import rebuilds (the thirteen `cd_*`/`interactions` tables plus
 `cd_drug_search` and `link_generic_brand`) is renamed to `<table>_prev`. The
 importer then creates fresh tables under the live names. `history` and
 `utility` are not swapped. Drug lookups are degraded while the import runs, as
 they always were; `getLastUpdateTime()` answers `"updating"` for the duration.
+
+Which half of the swap is in flight is recorded in a one-row `_carlos_drugref_swap`
+table, written before the first rename and cleared after the last drop. Neither the
+rename loop nor the drop loop is atomic, and the two partial states need opposite
+repairs: a `*_prev` set left by an interrupted **backup** is the only copy of the data
+and must be restored, while one left by an interrupted **discard** is a stale copy of
+data the import already replaced and must be finished off — restoring it would splice an
+old drug dataset into a new one. `recoverInterruptedSwap()` reads the marker and applies
+the matching repair; it runs at webapp start and again before each new swap.
+
+> **The swap assumes MySQL/MariaDB**, the only backend CARLOS deploys DrugRef against.
+> On PostgreSQL `ALTER TABLE ... RENAME TO` leaves the table's `serial` sequence under
+> the old name, so the importer's `CREATE TABLE ... id serial` collides with it. Running
+> DrugRef on PostgreSQL means fixing `DpdTableSwap` first.
 
 ### Step 1: DPD Import (`DPDImport.importDpd()`)
 
@@ -162,11 +176,18 @@ The worker wraps the whole pipeline. On any exception it:
 4. clears `Drugref.UPDATE_DB` in a `finally` block, so a failed update can be
    retried without restarting DrugRef.
 
-On success the `_prev` tables are dropped as the last step. If the JVM exits
-mid-update (an out-of-memory exit, a service restart) the `_prev` set is still
-there at the next start; `StartUp` calls `DpdTableSwap.restoreIfInterrupted()`
-before Spring and Hibernate come up, which restores the previous dataset so the
-schema validation and the first lookups see complete tables.
+The rollback window closes when the `history` row is written — the commit point, and
+deliberately the last fallible step. The `history` table is not swapped, so a row written
+before a step that later failed would survive the rollback and make `getLastUpdateTime()`
+report an abandoned attempt as the newest successful update. After that row is in, the new
+dataset is the good one: dropping the `_prev` set is best-effort and a failure there is
+logged, not rolled back.
+
+If the JVM exits mid-update (an out-of-memory exit, a service restart) the marker and the
+`_prev` set are still there at the next start; `StartUp` calls
+`DpdTableSwap.restoreIfInterrupted()` before Spring and Hibernate come up, which applies
+the repair the marker calls for, so schema validation and the first lookups see one
+complete dataset.
 
 ## Concurrency
 
@@ -180,7 +201,7 @@ schema validation and the first lookups see complete tables.
 | File | Purpose |
 |------|---------|
 | `ca/dpd/fetch/DpdDownloader.java` | Fetches and validates the three archives before any table is touched |
-| `ca/dpd/fetch/DpdTableSwap.java` | Renames the live tables aside for the import and restores them on failure |
+| `ca/dpd/fetch/DpdTableSwap.java` | Renames the live tables aside for the import, restores them on failure, and repairs an interrupted swap at startup |
 | `ca/dpd/fetch/DPDImport.java` | Main import orchestrator |
 | `ca/dpd/fetch/RecordParser.java` | CSV parser |
 | `ca/dpd/fetch/ConfigureSearchData.java` | Search index builder |

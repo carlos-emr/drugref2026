@@ -16,6 +16,7 @@
  */
 package io.github.carlos_emr.drugref2026.util;
 
+import java.sql.SQLException;
 import java.util.HashMap;
 import java.util.List;
 
@@ -42,14 +43,15 @@ import io.github.carlos_emr.drugref2026.ca.dpd.history.HistoryUtil;
  *       routes, forms, etc.) and build the search index</li>
  *   <li>Generate generic drug search entries from the imported data</li>
  *   <li>Flag ISMP (Institute for Safe Medication Practices) high-alert medications</li>
- *   <li>Record the update in the History table for auditing</li>
  *   <li>Enhance search data by adding descriptors and strength information to drug names</li>
+ *   <li>Record the update in the History table for auditing — the commit point</li>
  *   <li>Store update statistics (timing, row counts) in {@link Drugref#DB_INFO} and discard
  *       the {@code *_prev} tables</li>
  * </ol>
  *
- * <p>If any step fails the {@code *_prev} tables are put back, so a failed update leaves
- * the dataset exactly as it was. The outcome, success or failure with its reason, is
+ * <p>If any step up to and including the history record fails, the {@code *_prev} tables are
+ * put back, so a failed update leaves the dataset exactly as it was. After that point the new
+ * dataset is committed and only the cleanup remains, which cannot fail the run. The outcome, success or failure with its reason, is
  * recorded in {@link UpdateStatus} for {@link Drugref#getUpdateStatus()}.
  *
  * <p>The {@link Drugref#UPDATE_DB} flag is set for the duration of the update to prevent
@@ -88,10 +90,15 @@ public class RxUpdateDBWorker extends Thread{
             status.step("downloading Health Canada DPD archives");
             archives = DpdDownloader.download(DPDImport.dpdBaseUrl());
 
-            // Step 2: keep the current dataset as *_prev so a failure below can restore it
+            // Step 2: keep the current dataset as *_prev so a failure below can restore it.
+            // The flag goes up BEFORE the call, not after: backupLiveTables() renames
+            // fifteen tables one at a time, and a failure partway through leaves some of
+            // them moved. Setting the flag afterwards meant the catch block skipped the
+            // restore for exactly that case, and the next attempt would then drop those
+            // *_prev tables as stale -- discarding the only copy of the data.
             status.step("moving the current dataset aside");
-            swap.backupLiveTables();
             previousDatasetMovedAside = true;
+            swap.backupLiveTables();
 
             // Step 3: import the DPD data and build the search index
             status.step("importing DPD data and building the search index");
@@ -109,19 +116,27 @@ public class RxUpdateDBWorker extends Thread{
             status.step("applying ISMP medication safety names");
             dpdImport.setISMPmeds();
 
-            // Step 6: record this update in the History table, which is what
-            // getLastUpdateTime() reports. A silent failure here would make a
-            // completed update look like it never happened.
-            status.step("recording update history");
-            if (!new HistoryUtil().addUpdateHistory()) {
-                throw new IllegalStateException("could not record the update in the history table");
-            }
-
-            // Step 7: search-name enhancement (form descriptors, strengths)
+            // Step 6: search-name enhancement (form descriptors, strengths). Still
+            // inside the rollback window -- these rewrite cd_drug_search, so a failure
+            // here leaves the search index half-enhanced and the update is abandoned.
             status.step("enhancing search names");
             HashMap hm = dpdImport.numberTableRows();
             List<Integer> addedDescriptor = dpdImport.addDescriptorToSearchName();
             List<Integer> addedStrength = dpdImport.addStrengthToBrandName();
+
+            // Step 7: record the update in the History table -- the COMMIT POINT.
+            // It is the last fallible step inside the rollback window and it comes
+            // after every step that can still fail, because the history table is not
+            // swapped: a row written before an abandoned step survived the rollback,
+            // and getLastUpdateTime() then reported a failed attempt as the newest
+            // successful update while the restored data was in fact older.
+            status.step("recording update history");
+            if (!new HistoryUtil().addUpdateHistory()) {
+                throw new IllegalStateException("could not record the update in the history table");
+            }
+            // Past this line the new dataset is the good one: a later failure must not
+            // roll it back.
+            previousDatasetMovedAside = false;
 
             // Step 8: statistics for the admin interface, then let go of the old dataset
             Drugref.DB_INFO.put("tableRowNum", hm);
@@ -130,9 +145,17 @@ public class RxUpdateDBWorker extends Thread{
             Drugref.DB_INFO.put("descriptor", addedDescriptor);
             Drugref.DB_INFO.put("strength", addedStrength);
 
+            // Step 9: drop the previous dataset. Best-effort by design: the update is
+            // already committed, so a failure here leaves harmless *_prev tables that
+            // the next start (or the next update) clears, and must not fail the run.
             status.step("discarding the previous dataset");
-            swap.discardBackupTables();
-            previousDatasetMovedAside = false;
+            try {
+                swap.discardBackupTables();
+            } catch (SQLException | RuntimeException e) {
+                logger.warn("DrugRef update: the update succeeded but the previous dataset could not be"
+                        + " dropped; the " + DpdTableSwap.BACKUP_SUFFIX + " tables will be cleared on the"
+                        + " next start", e);
+            }
 
             long minutes = (System.currentTimeMillis() - startedAt) / 60000L;
             String summary = "updated in " + minutes + " min; " + hm.get("CdDrugProduct") + " products, "
@@ -166,7 +189,7 @@ public class RxUpdateDBWorker extends Thread{
     }
 
     /** Root-cause text for the operator: the innermost message, prefixed by the exception type. */
-    static String describe(Throwable t) {
+    public static String describe(Throwable t) {
         Throwable root = t;
         while (root.getCause() != null && root.getCause() != root) {
             root = root.getCause();

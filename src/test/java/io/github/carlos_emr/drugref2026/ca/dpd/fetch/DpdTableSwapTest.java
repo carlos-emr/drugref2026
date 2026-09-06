@@ -101,24 +101,107 @@ class DpdTableSwapTest {
     }
 
     @Test
-    void shouldReplaceStaleBackup_whenBackingUpAgain() throws SQLException {
+    void shouldKeepTheRealPreviousDataset_whenRetryingAnAbandonedAttempt() throws SQLException {
+        // First attempt parks the previous dataset and then dies mid-import, leaving
+        // partially imported live tables behind.
         swap.backupLiveTables();
         try (Statement st = con.createStatement()) {
             st.execute("CREATE TABLE cd_drug_product (id int primary key, brand_name varchar(200))");
-            st.execute("INSERT INTO cd_drug_product VALUES (1, 'SECOND')");
+            st.execute("INSERT INTO cd_drug_product VALUES (1, 'HALF-IMPORTED')");
         }
 
-        // a second attempt while a stale *_prev set is still around
+        // The retry must settle that first: an earlier revision dropped the *_prev set
+        // as stale and promoted the half-imported tables in its place, which threw away
+        // the only remaining copy of the real dataset.
         swap.backupLiveTables();
 
-        assertThat(scalar("SELECT brand_name FROM cd_drug_product_prev")).isEqualTo("SECOND");
+        assertThat(scalar("SELECT brand_name FROM cd_drug_product_prev")).isEqualTo("OLD-AMOXICILLIN");
+        assertThat(scalar("SELECT name FROM cd_drug_search_prev")).isEqualTo("OLD-AMOXICILLIN 500MG");
         assertThat(exists("cd_drug_product")).isFalse();
+        assertThat(swap.readState()).isEqualTo(DpdTableSwap.STATE_BACKUP);
+    }
+
+    @Test
+    void shouldRestorePreviousRows_whenBackupWasInterruptedPartway() throws SQLException {
+        // backupLiveTables() renames one table at a time. Simulate a failure after the
+        // first rename: half the dataset is parked, the state marker says BACKUP.
+        try (Statement st = con.createStatement()) {
+            st.execute("CREATE TABLE " + DpdTableSwap.STATE_TABLE + " (state varchar(16) NOT NULL)");
+            st.execute("INSERT INTO " + DpdTableSwap.STATE_TABLE + " VALUES ('"
+                    + DpdTableSwap.STATE_BACKUP + "')");
+            st.execute("ALTER TABLE cd_drug_product RENAME TO cd_drug_product_prev");
+        }
+
+        String action = swap.recoverInterruptedSwap();
+
+        assertThat(action).contains("restored");
+        assertThat(scalar("SELECT brand_name FROM cd_drug_product")).isEqualTo("OLD-AMOXICILLIN");
+        assertThat(scalar("SELECT name FROM cd_drug_search")).isEqualTo("OLD-AMOXICILLIN 500MG");
+        assertThat(swap.readState()).isNull();
+    }
+
+    @Test
+    void shouldFinishTheDiscard_whenCleanupWasInterruptedPartway() throws SQLException {
+        // The import was accepted and discardBackupTables() died partway: some *_prev
+        // are already gone, the rest are stale copies of data the import replaced.
+        // Restoring them would splice an old dataset into a new one.
+        swap.backupLiveTables();
+        try (Statement st = con.createStatement()) {
+            st.execute("CREATE TABLE cd_drug_product (id int primary key, brand_name varchar(200))");
+            st.execute("INSERT INTO cd_drug_product VALUES (1, 'NEW-AMOXICILLIN')");
+            st.execute("CREATE TABLE cd_drug_search (id int primary key, name varchar(200))");
+            st.execute("INSERT INTO cd_drug_search VALUES (1, 'NEW-AMOXICILLIN 500MG')");
+            st.execute("DELETE FROM " + DpdTableSwap.STATE_TABLE);
+            st.execute("INSERT INTO " + DpdTableSwap.STATE_TABLE + " VALUES ('"
+                    + DpdTableSwap.STATE_DISCARD + "')");
+            st.execute("DROP TABLE cd_drug_search_prev");
+        }
+
+        String action = swap.recoverInterruptedSwap();
+
+        assertThat(action).contains("discarding");
+        assertThat(swap.listBackupTables()).isEmpty();
+        assertThat(scalar("SELECT brand_name FROM cd_drug_product")).isEqualTo("NEW-AMOXICILLIN");
+        assertThat(scalar("SELECT name FROM cd_drug_search")).isEqualTo("NEW-AMOXICILLIN 500MG");
+        assertThat(swap.readState()).isNull();
+    }
+
+    @Test
+    void shouldSettleAnUnresolvedSwap_beforeStartingANewOne() throws SQLException {
+        // A *_prev set left by an interrupted backup is the only copy of the data.
+        // Starting a fresh swap must restore it first, never drop it as stale.
+        try (Statement st = con.createStatement()) {
+            st.execute("CREATE TABLE " + DpdTableSwap.STATE_TABLE + " (state varchar(16) NOT NULL)");
+            st.execute("INSERT INTO " + DpdTableSwap.STATE_TABLE + " VALUES ('"
+                    + DpdTableSwap.STATE_BACKUP + "')");
+            st.execute("DROP TABLE cd_drug_product");
+            st.execute("CREATE TABLE cd_drug_product_prev (id int primary key, brand_name varchar(200))");
+            st.execute("INSERT INTO cd_drug_product_prev VALUES (1, 'ONLY-COPY')");
+        }
+
+        swap.backupLiveTables();
+
+        // The only copy survived: recovered, then parked again by the new swap.
+        assertThat(scalar("SELECT brand_name FROM cd_drug_product_prev")).isEqualTo("ONLY-COPY");
+        assertThat(swap.readState()).isEqualTo(DpdTableSwap.STATE_BACKUP);
+    }
+
+    @Test
+    void shouldRecordAndClearState_aroundASuccessfulSwap() throws SQLException {
+        assertThat(swap.readState()).isNull();
+
+        swap.backupLiveTables();
+        assertThat(swap.readState()).isEqualTo(DpdTableSwap.STATE_BACKUP);
+
+        swap.discardBackupTables();
+        assertThat(swap.readState()).isNull();
     }
 
     @Test
     void shouldDoNothing_whenNoBackupPresent() throws SQLException {
         assertThat(swap.restoreBackupTables()).isZero();
         assertThat(scalar("SELECT brand_name FROM cd_drug_product")).isEqualTo("OLD-AMOXICILLIN");
+        assertThat(swap.recoverInterruptedSwap()).isEqualTo("nothing to recover");
     }
 
     private boolean exists(String table) throws SQLException {

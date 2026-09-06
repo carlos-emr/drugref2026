@@ -200,7 +200,7 @@ Check for drug-drug interactions among a list of DINs (the patient's current med
 ### `updateDB()`
 Trigger a full database update from Health Canada's DPD data. Launches `RxUpdateDBWorker` in a background thread.
 
-**Returns:** `"running"` if a new update was started, `"updating"` if one is already in progress.
+**Returns:** `"running"` if a new update was started, `"updating"` if one is already in progress, or `"error"` if the worker thread could not be started (the in-progress flag is cleared in that case, so the call can be retried).
 
 ### `getLastUpdateTime()`
 Get the timestamp of the most recent successful database update.
