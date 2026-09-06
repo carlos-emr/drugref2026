@@ -1863,18 +1863,31 @@ public class TablesDao {
 
                 boolean warned = false;
                 boolean resolvedAny = false;
-                for (Integer category : categories) {
-                    Boolean match = matchesAllergyCategory(em, atcCode, category.intValue(), aDesc);
-                    if (match == null) {
-                        // The allergen name does not exist in that part of the reference, so this
-                        // category checked nothing. Only report "missing" if no category could.
-                        continue;
+                try {
+                    for (Integer category : categories) {
+                        if (category == null) {
+                            continue;
+                        }
+                        Boolean match = matchesAllergyCategory(em, atcCode, category.intValue(), aDesc);
+                        if (match == null) {
+                            // The allergen name does not exist in that part of the reference, so this
+                            // category checked nothing. Only report "missing" if no category could.
+                            continue;
+                        }
+                        resolvedAny = true;
+                        if (match.booleanValue()) {
+                            warned = true;
+                            break;
+                        }
                     }
-                    resolvedAny = true;
-                    if (match.booleanValue()) {
-                        warned = true;
-                        break;
-                    }
+                } catch (Exception perAllergy) {
+                    // One allergy's lookup failing must not decide the others. Before this was
+                    // scoped per allergy, a single failure broke the loop and every allergy after
+                    // it came back in neither list -- reported as checked and clear without ever
+                    // being looked at.
+                    logger.error("allergy check failed for allergy id " + aId + " against atcCode=" + atcCode, perAllergy);
+                    missing.add(aId);
+                    continue;
                 }
 
                 if (warned) {
@@ -1887,7 +1900,12 @@ public class TablesDao {
                 }
             }
         } catch (Exception e) {
+            // Anything that escapes the per-allergy handler above (opening the entity manager,
+            // iterating the input) leaves allergies genuinely unchecked. Report every one that did
+            // not reach a verdict as "missing": an empty response here is indistinguishable from a
+            // completed check that found nothing, which is the failure this method exists to avoid.
             logger.error("getAllergyWarnings failed for atcCode=" + atcCode, e);
+            markUncheckedAsMissing(allergies, results, missing);
         } finally {
             JpaUtils.close(em);
         }
@@ -1896,6 +1914,31 @@ public class TablesDao {
         ha.put("missing", missing);
         vec.add(ha);
         return vec;
+    }
+
+    /**
+     * Adds every allergy id that reached no verdict to {@code missing}, so an aborted run reports
+     * "not checked" for them instead of leaving them out of both lists.
+     *
+     * @param allergies the caller's allergy list, each entry a Hashtable carrying an "id"
+     * @param results the ids already warned on
+     * @param missing the ids already known to be unchecked; extended in place
+     */
+    private void markUncheckedAsMissing(Vector allergies, Vector results, Vector missing) {
+        if (allergies == null) {
+            return;
+        }
+        Enumeration remaining = allergies.elements();
+        while (remaining.hasMoreElements()) {
+            Object element = remaining.nextElement();
+            if (!(element instanceof Hashtable)) {
+                continue;
+            }
+            Object aId = ((Hashtable) element).get("id");
+            if (aId != null && !results.contains(aId) && !missing.contains(aId)) {
+                missing.add(aId);
+            }
+        }
     }
 
     /**
@@ -1945,7 +1988,8 @@ public class TablesDao {
     @SuppressWarnings("unchecked")
     private List<Integer> resolveFreeTextAllergenCategories(EntityManager em, String aDesc) {
         Query q = em.createQuery(
-                "select distinct cds.category from CdDrugSearch cds where lower(cds.name) = lower(:aDesc)");
+                "select distinct cds.category from CdDrugSearch cds "
+                        + "where cds.category is not null and lower(cds.name) = lower(:aDesc)");
         q.setParameter("aDesc", aDesc);
         List<Integer> categories = q.getResultList();
         return categories == null ? new ArrayList<Integer>() : categories;
@@ -1979,17 +2023,31 @@ public class TablesDao {
             if (allergenAtcNumbers == null || allergenAtcNumbers.isEmpty()) {
                 return null;
             }
+            // A blank code would prefix EVERY drug: String.startsWith("") is always true, so one
+            // such row would warn on every prescription this reference is ever asked about. Skip
+            // them, and if that leaves nothing usable say so rather than answering "clear".
+            boolean checkedAgainstAnyCode = false;
             for (String allergenAtc : allergenAtcNumbers) {
-                if (allergenAtc != null && atcCode.startsWith(allergenAtc)) {
+                if (allergenAtc == null || allergenAtc.trim().isEmpty()) {
+                    continue;
+                }
+                checkedAgainstAnyCode = true;
+                if (atcCode.startsWith(allergenAtc.trim())) {
                     return Boolean.TRUE;
                 }
             }
-            return Boolean.FALSE;
+            return checkedAgainstAnyCode ? Boolean.FALSE : null;
         }
 
         if (category == 10) {
+            // AHFS was deprecated in July 2022, so an extract can carry the class DESCRIPTION with
+            // no number beside it. Excluding those in the query is what keeps such an allergen
+            // reported as unchecked: concatenating a null number gave the literal prefix "null%",
+            // which matches nothing and would have answered "checked and clear".
             Query queryAhfsNumber = em.createQuery(
-                    "select distinct tc.tcAhfsNumber from CdTherapeuticClass tc where lower(tc.tcAhfs) = lower(:aDesc)");
+                    "select distinct tc.tcAhfsNumber from CdTherapeuticClass tc "
+                            + "where lower(tc.tcAhfs) = lower(:aDesc) "
+                            + "and tc.tcAhfsNumber is not null and trim(tc.tcAhfsNumber) <> ''");
             queryAhfsNumber.setParameter("aDesc", aDesc);
             List<String> ahfsNumbers = queryAhfsNumber.getResultList();
             if (ahfsNumbers == null || ahfsNumbers.isEmpty()) {
