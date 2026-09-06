@@ -1800,9 +1800,13 @@ public class TablesDao {
      *
      * @param atcCode the ATC code of the drug being prescribed
      * @param allergies a Vector of Hashtables, each with keys "type", "description", "id"
-     * @return a Vector containing a single Hashtable with keys "warnings" (Vector of matching
-     *         allergy IDs) and "missing" (Vector of allergy IDs whose allergen could not be
-     *         resolved in the reference at all, so nothing was checked for them)
+     * @return a Vector containing a single Hashtable with keys "warnings" (Vector of allergy IDs
+     *         the drug is contraindicated against) and "missing" (Vector of allergy IDs that were
+     *         NOT CHECKED, for any reason: the allergen name is one the reference does not carry,
+     *         the allergy arrived with no description, or its only category has no implementation
+     *         here). "missing" is deliberately not "checked and clear" — an ID absent from both
+     *         lists is the only answer that means this drug was compared against that allergy and
+     *         did not match.
      */
     public Vector getAllergyWarnings(String atcCode, Vector allergies) {
 
