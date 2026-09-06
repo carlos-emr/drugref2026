@@ -19,6 +19,7 @@ package io.github.carlos_emr.drugref2026.util;
 import java.sql.SQLException;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import org.apache.logging.log4j.Logger;
 
@@ -44,15 +45,21 @@ import io.github.carlos_emr.drugref2026.ca.dpd.history.HistoryUtil;
  *   <li>Generate generic drug search entries from the imported data</li>
  *   <li>Flag ISMP (Institute for Safe Medication Practices) high-alert medications</li>
  *   <li>Enhance search data by adding descriptors and strength information to drug names</li>
- *   <li>Record the update in the History table for auditing — the commit point</li>
+ *   <li>Check the rebuild is not empty, then move the swap marker to {@code DISCARD} — <b>the
+ *       commit point</b></li>
+ *   <li>Record the update in the History table for auditing</li>
  *   <li>Store update statistics (timing, row counts) in {@link Drugref#DB_INFO} and discard
  *       the {@code *_prev} tables</li>
  * </ol>
  *
- * <p>If any step up to and including the history record fails, the {@code *_prev} tables are
- * put back, so a failed update leaves the dataset exactly as it was. After that point the new
- * dataset is committed and only the cleanup remains, which cannot fail the run. The outcome, success or failure with its reason, is
- * recorded in {@link UpdateStatus} for {@link Drugref#getUpdateStatus()}.
+ * <p>If any step up to and including the marker move fails, the {@code *_prev} tables are put
+ * back, so a failed update leaves the dataset exactly as it was. The marker move is the commit,
+ * not the history row: the history insert comes after it deliberately, because a crash between
+ * the two must leave the NEW data in place with a stale timestamp rather than a history row
+ * claiming an update that had been rolled back. So a history failure does <em>not</em> restore
+ * anything — the dataset is already committed and the run reports the failure with the new data
+ * live. The outcome, success or failure with its reason, is recorded in {@link UpdateStatus} for
+ * {@link Drugref#getUpdateStatus()}.
  *
  * <p>The {@link Drugref#UPDATE_DB} flag is set for the duration of the update to prevent
  * concurrent updates and to inform clients that data is being refreshed; it is cleared in
@@ -135,6 +142,7 @@ public class RxUpdateDBWorker extends Thread{
             // stale timestamp -- correct data with a pessimistic date, which is the safe
             // direction for a drug database.
             status.step("committing the new dataset");
+            requireNonEmptyRebuild(hm);
             swap.markDiscarding();
             previousDatasetMovedAside = false;
 
@@ -215,6 +223,42 @@ public class RxUpdateDBWorker extends Thread{
             // the end of this run could start a second worker.
             synchronized (Drugref.class) {
                 Drugref.UPDATE_DB = false;
+            }
+        }
+    }
+
+    /** The tables an update that worked cannot leave empty, whatever else it did. */
+    private static final String[] MUST_NOT_BE_EMPTY = {"CdDrugProduct", "CdDrugSearch"};
+
+    /**
+     * Refuses to commit a rebuild that produced no drugs.
+     *
+     * <p>The last thing standing between an empty import and the destruction of the previous
+     * dataset. Every step before this reports failure by throwing, so the worker's own rollback
+     * covers them — but a step that fails <em>silently</em> and returns normally reaches the
+     * commit point, and past it {@link DpdTableSwap#discardBackupTables()} drops the
+     * {@code *_prev} tables that are the only remaining copy of the drug data. The row counts
+     * are already in hand ({@link DPDImport#numberTableRows()} runs a step earlier and feeds the
+     * success message), so the check costs nothing; it simply was not being made, and the run
+     * would announce "0 products" as a success while deleting the backup.
+     *
+     * <p>Deliberately a floor of zero rather than a plausibility threshold: this guards against
+     * a broken pipeline, not against Health Canada publishing a short extract, and a worker that
+     * second-guesses a genuinely smaller dataset would be its own outage. It runs before the
+     * marker moves, so the throw lands in the rollback window and the previous dataset comes
+     * back.
+     *
+     * @param rowCounts entity-name to row-count, from {@link DPDImport#numberTableRows()}
+     * @throws IllegalStateException if a table an update cannot legitimately empty is empty
+     */
+    static void requireNonEmptyRebuild(Map<String, ?> rowCounts) {
+        for (String table : MUST_NOT_BE_EMPTY) {
+            Object count = rowCounts == null ? null : rowCounts.get(table);
+            long rows = count instanceof Number ? ((Number) count).longValue() : -1L;
+            if (rows == 0L) {
+                throw new IllegalStateException("the rebuilt " + table + " table is empty, so the"
+                        + " import produced no drug data; abandoning the update and keeping the"
+                        + " previous dataset rather than discarding it");
             }
         }
     }

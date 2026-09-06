@@ -17,6 +17,7 @@
  */
 package io.github.carlos_emr.drugref2026.ca.dpd.fetch;
 
+import java.io.IOException;
 import java.io.InputStream;
 import io.github.carlos_emr.drugref2026.ca.dpd.CdVeterinarySpecies;
 import com.Ostermiller.util.CSVParser;
@@ -174,6 +175,41 @@ public class RecordParser {
      * @return always returns null (return type is vestigial)
      * @throws Exception if parsing or persistence fails
      */
+    /**
+     * Reads a decoded character stream to the end.
+     *
+     * <p>Propagates, and that is the point. Three copies of this loop used to sit inline with
+     * {@code catch (Exception e) { e.printStackTrace(); }} around them, and the variable holding
+     * the result was assigned inside the try — so a read failure did not yield a truncated file,
+     * it yielded an <em>empty</em> one, silently. The caller then parsed nothing, persisted
+     * nothing, committed, and returned normally, and the worker went on to treat the rebuild as
+     * a success and drop the {@code *_prev} tables — destroying the only copy of the previous
+     * drug data while reporting "0 products" in the success message.
+     *
+     * <p>That was survivable when a failed import merely left the tables empty. It stopped being
+     * survivable once the swap made those tables the sole backup, so the failure has to reach
+     * the worker.
+     *
+     * <p>The caller re-encodes the result with {@code getBytes("UTF-8")} and re-parses it. That
+     * round trip is legacy and this method preserves it exactly rather than optimising it away:
+     * the reader is already a UTF-8 {@link InputStreamReader}, so the loop decodes and the
+     * caller re-encodes, which is a no-op on well-formed input but normalises malformed
+     * sequences to the replacement character. Changing that would change which rows parse.
+     * (The inline comment at each call site still says "ISO-8859-1 to UTF-8"; it predates the
+     * reader being constructed with an explicit charset and is no longer what happens.)
+     *
+     * @throws IOException if the underlying stream fails partway — a corrupt entry in the DPD
+     *         archive, or a truncated read from the temp file
+     */
+    private static String readFully(Reader in) throws IOException {
+        StringBuilder buf = new StringBuilder();
+        int ch;
+        while ((ch = in.read()) > -1) {
+            buf.append((char) ch);
+        }
+        return buf.toString();
+    }
+
     public static Object getDPDObject(String type, InputStream is, EntityManager em) throws Exception {
         logger.info("DrugRef update: parsing " + type);
         InputStreamReader isr = new InputStreamReader(is, "UTF-8");
@@ -213,19 +249,7 @@ public class RecordParser {
             }
         } else if ("comp.txt".equals(type) || "comp_ia.txt".equals(type)) {
             //change encoding from ISO-8859-1 to UTF-8
-            String str = "";
-            try {
-                StringBuffer buf = new StringBuffer();
-                int ch;
-                while ((ch = in.read()) > -1) {
-                    buf.append((char) ch);
-                }
-                //in.close();
-                str = buf.toString();
-                //   p("** ",str);
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
+            String str = readFully(in);
 
             InputStream ins = new ByteArrayInputStream(str.getBytes("UTF-8"));
             CSVParser csv2 = new CSVParser(ins);
@@ -284,19 +308,7 @@ public class RecordParser {
             }
         } else if ("drug.txt".equals(type) || "drug_ia.txt".equals(type)) {
             //change encoding from ISO-8859-1 to UTF-8
-            String str = "";
-            try {
-                StringBuffer buf = new StringBuffer();
-                int ch;
-                while ((ch = in.read()) > -1) {
-                    buf.append((char) ch);
-                }
-                //in.close();
-                str = buf.toString();
-                //   p("** ",str);
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
+            String str = readFully(in);
             InputStream ins = new ByteArrayInputStream(str.getBytes("UTF-8"));
             CSVParser csv2 = new CSVParser(ins);
             DrugrefProperties dp=DrugrefProperties.getInstance();
@@ -366,19 +378,7 @@ public class RecordParser {
             DOSAGE_UNIT                              VARCHAR2(40)
             NOTES                                    VARCHAR2(2000)
              */
-            String str = "";
-            try {
-                StringBuffer buf = new StringBuffer();
-                int ch;
-                while ((ch = in.read()) > -1) {
-                    buf.append((char) ch);
-                }
-                //in.close();
-                str = buf.toString();
-                //   p("** ",str);
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
+            String str = readFully(in);
             InputStream ins = new ByteArrayInputStream(str.getBytes("UTF-8"));
             CSVParser csv2 = new CSVParser(ins);
 
