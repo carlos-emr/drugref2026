@@ -1761,7 +1761,9 @@ public class TablesDao {
      * allergen name lives in, and the check for a category is: does the drug being prescribed
      * share that part of the reference with the allergen?</p>
      * <ul>
-     *   <li><b>Type 8 (ATC class):</b> direct ATC code match against therapeutic class.</li>
+     *   <li><b>Type 8 (ATC class):</b> resolve the allergen name to its ATC code(s) and check
+     *       whether the drug's ATC code sits under any of them. ATC is a hierarchy encoded in the
+     *       code, and an allergen can name any level of it, so this is a prefix match.</li>
      *   <li><b>Type 10 (AHFS class):</b> look up the AHFS numbers carrying that class name, then
      *       check whether the drug's ATC code appears under any of them.</li>
      *   <li><b>Type 11/12 (generic / compound):</b> resolve the generic name through the link
@@ -1782,8 +1784,19 @@ public class TablesDao {
      * allergic to PENICILLINS produced no warning at all, which is the dangerous direction for
      * this function to fail in. Resolution is by EXACT name (the column collation makes that
      * case-insensitive) against {@code cd_drug_search}, the same table the picker offers those
-     * names from — deliberately not a fuzzy or prefix match, because a false allergy alert on a
-     * prescription is its own harm and every near-miss spelling would produce one.</p>
+     * names from — deliberately whole-name and not a fuzzy or substring match, because a false
+     * allergy alert on a prescription is its own harm and every near-miss spelling would produce
+     * one. (The hierarchy prefix matching inside categories 8 and 10 is a different thing: it
+     * walks the reference's own classification codes, not the typed text.)</p>
+     *
+     * <p><b>Data dependency.</b> Category 10 is the only check that reads AHFS, which Health
+     * Canada deprecated in July 2022 — {@link CdTherapeuticClass} notes {@code tcAhfsNumber} may
+     * be null in newer extracts. An allergen the reference knows ONLY as an AHFS class therefore
+     * stops resolving once an import carries no AHFS, and is reported in "missing" rather than
+     * warned on. That is the safe direction (it says "not checked", not "no allergy"), and
+     * category 8 covering the ATC hierarchy is what keeps class-level allergies working without
+     * AHFS; but an import that drops AHFS should be paired with a check that the class allergens
+     * clinicians actually record still resolve.</p>
      *
      * @param atcCode the ATC code of the drug being prescribed
      * @param allergies a Vector of Hashtables, each with keys "type", "description", "id"
@@ -1895,16 +1908,30 @@ public class TablesDao {
             return true;
         }
         String t = aType.trim();
-        return "0".equals(t) || "null".equals(t);
+        if ("0".equals(t) || "null".equals(t)) {
+            return true;
+        }
+        // Anything that is not a category number names no category either. Falling through to
+        // Integer.valueOf() here would report the allergy as unresolvable without ever trying its
+        // description, which is the silent-skip this method exists to prevent.
+        try {
+            Integer.valueOf(t);
+            return false;
+        } catch (NumberFormatException nfe) {
+            return true;
+        }
     }
 
     /**
      * Resolves a free-text allergen description to the drug-reference categories that carry a
      * name exactly equal to it.
      *
-     * <p>Exact match only. This feeds a prescription-time safety alert, where a wrong match is a
-     * false alarm the prescriber learns to dismiss — so a name is either one the reference knows
-     * or it is reported as unresolved.</p>
+     * <p>Whole-name match only. This feeds a prescription-time safety alert, where a wrong match
+     * is a false alarm the prescriber learns to dismiss — so a name is either one the reference
+     * knows or it is reported as unresolved. Case is folded in the query rather than left to the
+     * column collation: DrugRef also runs on PostgreSQL (see
+     * {@code DrugrefProperties.isPostgres()}), where JPQL {@code =} is case-sensitive and a
+     * clinician's "Penicillins" would not match the reference's "PENICILLINS".</p>
      *
      * @param em the entity manager to query with
      * @param aDesc the trimmed free-text allergen description
@@ -1914,7 +1941,7 @@ public class TablesDao {
     @SuppressWarnings("unchecked")
     private List<Integer> resolveFreeTextAllergenCategories(EntityManager em, String aDesc) {
         Query q = em.createQuery(
-                "select distinct cds.category from CdDrugSearch cds where cds.name = (:aDesc)");
+                "select distinct cds.category from CdDrugSearch cds where lower(cds.name) = lower(:aDesc)");
         q.setParameter("aDesc", aDesc);
         List<Integer> categories = q.getResultList();
         return categories == null ? new ArrayList<Integer>() : categories;
@@ -1935,23 +1962,30 @@ public class TablesDao {
     @SuppressWarnings("unchecked")
     private Boolean matchesAllergyCategory(EntityManager em, String atcCode, int category, String aDesc) {
         if (category == 8) {
-            Query query = em.createQuery(
-                    "select tc.tcAtcNumber from CdTherapeuticClass tc where tc.tcAtcNumber = (:atcCode) and tc.tcAtc = (:aDesc)");
-            query.setParameter("atcCode", atcCode);
-            query.setParameter("aDesc", aDesc);
-            if (!query.getResultList().isEmpty()) {
-                return Boolean.TRUE;
+            // ATC is a hierarchy encoded in the code itself, and an allergen name can sit at any
+            // level of it: J01CF is "BETA-LACTAMASE RESISTANT PENICILLINS" and J01CF02 is the
+            // cloxacillin under it, each its own row. Comparing the prescribed drug's own
+            // description would only ever match a leaf, so an allergy to the class name never
+            // warned on any drug in that class. Resolve the name to its ATC code(s) and prefix
+            // match, exactly as category 10 does with AHFS numbers.
+            Query atcNumbers = em.createQuery(
+                    "select distinct tc.tcAtcNumber from CdTherapeuticClass tc where lower(tc.tcAtc) = lower(:aDesc)");
+            atcNumbers.setParameter("aDesc", aDesc);
+            List<String> allergenAtcNumbers = atcNumbers.getResultList();
+            if (allergenAtcNumbers == null || allergenAtcNumbers.isEmpty()) {
+                return null;
             }
-            // The ATC class name has to exist somewhere for FALSE to mean "checked and clear".
-            Query known = em.createQuery(
-                    "select count(tc) from CdTherapeuticClass tc where tc.tcAtc = (:aDesc)");
-            known.setParameter("aDesc", aDesc);
-            return ((Number) known.getSingleResult()).longValue() > 0 ? Boolean.FALSE : null;
+            for (String allergenAtc : allergenAtcNumbers) {
+                if (allergenAtc != null && atcCode.startsWith(allergenAtc)) {
+                    return Boolean.TRUE;
+                }
+            }
+            return Boolean.FALSE;
         }
 
         if (category == 10) {
             Query queryAhfsNumber = em.createQuery(
-                    "select distinct tc.tcAhfsNumber from CdTherapeuticClass tc where tc.tcAhfs = (:aDesc)");
+                    "select distinct tc.tcAhfsNumber from CdTherapeuticClass tc where lower(tc.tcAhfs) = lower(:aDesc)");
             queryAhfsNumber.setParameter("aDesc", aDesc);
             List<String> ahfsNumbers = queryAhfsNumber.getResultList();
             if (ahfsNumbers == null || ahfsNumbers.isEmpty()) {
@@ -1988,16 +2022,24 @@ public class TablesDao {
             }
             Query query = em.createQuery(
                     "select distinct tc.tcAtcNumber from CdDrugSearch cds, CdTherapeuticClass tc, LinkGenericBrand lgb "
-                            + "where tc.tcAtcNumber = (:atcCode) and cds.name = (:aDesc) and cds.id = lgb.id and lgb.drugCode in (:drugCodes)");
+                            + "where tc.tcAtcNumber = (:atcCode) and lower(cds.name) = lower(:aDesc) and cds.id = lgb.id and lgb.drugCode in (:drugCodes)");
             query.setParameter("atcCode", atcCode);
             query.setParameter("aDesc", aDesc);
             query.setParameter("drugCodes", drugCodeStrings);
-            return query.getResultList().isEmpty() ? Boolean.FALSE : Boolean.TRUE;
+            if (!query.getResultList().isEmpty()) {
+                return Boolean.TRUE;
+            }
+            // An empty result here means either "this drug is not that generic" or "the reference
+            // has never heard of this generic". Only the first is a checked-and-clear answer.
+            Query known = em.createQuery(
+                    "select count(cds) from CdDrugSearch cds where cds.category in (11, 12) and lower(cds.name) = lower(:aDesc)");
+            known.setParameter("aDesc", aDesc);
+            return ((Number) known.getSingleResult()).longValue() > 0 ? Boolean.FALSE : null;
         }
 
         if (category == 13) {
             Query brandDrugCodes = em.createQuery(
-                    "select cds.drugCode from CdDrugSearch cds where cds.category = 13 and cds.name = (:aDesc)");
+                    "select cds.drugCode from CdDrugSearch cds where cds.category = 13 and lower(cds.name) = lower(:aDesc)");
             brandDrugCodes.setParameter("aDesc", aDesc);
             List<String> codes = brandDrugCodes.getResultList();
             if (codes == null || codes.isEmpty()) {
@@ -2014,11 +2056,13 @@ public class TablesDao {
             if (codeInts.isEmpty()) {
                 return null;
             }
+            // The brand's drug codes are already resolved above, so the name is fully spent:
+            // keeping CdDrugSearch in this query only cross-joins every row sharing that name
+            // back over the result for no added predicate.
             Query query = em.createQuery(
-                    "select distinct tc.tcAtcNumber from CdDrugSearch cds, CdTherapeuticClass tc "
-                            + "where tc.tcAtcNumber = (:atcCode) and cds.name = (:aDesc) and tc.drugCode in (:codes)");
+                    "select distinct tc.tcAtcNumber from CdTherapeuticClass tc "
+                            + "where tc.tcAtcNumber = (:atcCode) and tc.drugCode in (:codes)");
             query.setParameter("atcCode", atcCode);
-            query.setParameter("aDesc", aDesc);
             query.setParameter("codes", codeInts);
             return query.getResultList().isEmpty() ? Boolean.FALSE : Boolean.TRUE;
         }
