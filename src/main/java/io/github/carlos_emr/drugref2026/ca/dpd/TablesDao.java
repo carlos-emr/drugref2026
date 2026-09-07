@@ -1803,8 +1803,9 @@ public class TablesDao {
      * @return a Vector containing a single Hashtable with keys "warnings" (Vector of allergy IDs
      *         the drug is contraindicated against) and "missing" (Vector of allergy IDs that were
      *         NOT CHECKED, for any reason: the allergen name is one the reference does not carry,
-     *         the allergy arrived with no description, or its only category has no implementation
-     *         here). "missing" is deliberately not "checked and clear" — an ID absent from both
+     *         the allergy arrived with no description, its only category has no implementation
+     *         here, or the prescription itself arrived with no usable ATC code). "missing" is
+     *         deliberately not "checked and clear" — an ID absent from both
      *         lists is the only answer that means this drug was compared against that allergy and
      *         did not match.
      */
@@ -1820,14 +1821,27 @@ public class TablesDao {
         // downgrade a real "checked and clear" answer to "never checked".
         Vector cleared = new Vector();
 
-        if (atcCode == null || atcCode.matches("") || atcCode.matches("null")) {
+        // Surrounding whitespace would survive into the category 8 prefix comparison and make
+        // every real code fail to match, so normalise once here and compare the trimmed value
+        // everywhere below.
+        String drugAtcCode = atcCode == null ? "" : atcCode.trim();
+        if (drugAtcCode.isEmpty() || "null".equalsIgnoreCase(drugAtcCode)) {
+            // No drug code means nothing was compared against anything. Returning both lists empty
+            // would claim every allergy was checked and none matched -- the silent all-clear this
+            // method exists to prevent -- so report every allergy as not checked instead.
+            logger.warn("getAllergyWarnings called with no usable atcCode; reporting every allergy as not checked");
+            markUncheckedAsMissing(allergies, results, missing, cleared);
             ha.put("warnings", results);
             ha.put("missing", missing);
             vec.add(ha);
             return vec;
         }
-        EntityManager em = JpaUtils.createEntityManager();
+        // Creating the entity manager is itself a database operation and can fail. Inside the try
+        // that failure reports every allergy as not checked; outside it the exception escapes to
+        // the caller, which renders an error as "no warnings".
+        EntityManager em = null;
         try {
+            em = JpaUtils.createEntityManager();
             Enumeration e = allergies.elements();
             while (e.hasMoreElements()) {
                 Hashtable alleHash = new Hashtable((Hashtable) e.nextElement());
@@ -1876,7 +1890,7 @@ public class TablesDao {
                         if (category == null) {
                             continue;
                         }
-                        Boolean match = matchesAllergyCategory(em, atcCode, category.intValue(), aDesc);
+                        Boolean match = matchesAllergyCategory(em, drugAtcCode, category.intValue(), aDesc);
                         if (match == null) {
                             // The allergen name does not exist in that part of the reference, so this
                             // category checked nothing. Only report "missing" if no category could.
@@ -1893,13 +1907,13 @@ public class TablesDao {
                     // scoped per allergy, a single failure broke the loop and every allergy after
                     // it came back in neither list -- reported as checked and clear without ever
                     // being looked at.
-                    logger.error("allergy check failed for allergy id " + aId + " against atcCode=" + atcCode, perAllergy);
+                    logger.error("allergy check failed for allergy id " + aId + " against atcCode=" + drugAtcCode, perAllergy);
                     missing.add(aId);
                     continue;
                 }
 
                 if (warned) {
-                    logger.debug(atcCode + " is in allergy group " + aDesc);
+                    logger.debug(drugAtcCode + " is in allergy group " + aDesc);
                     results.add(aId);
                 } else if (!resolvedAny) {
                     missing.add(aId);
@@ -1907,7 +1921,7 @@ public class TablesDao {
                     // Checked against the reference and not a match. That verdict is carried by
                     // absence from both lists, so it has to be remembered separately or a later
                     // failure would relabel it as never checked.
-                    logger.debug(atcCode + " is NOT in allergy group " + aDesc);
+                    logger.debug(drugAtcCode + " is NOT in allergy group " + aDesc);
                     cleared.add(aId);
                 }
             }
@@ -1916,10 +1930,12 @@ public class TablesDao {
             // iterating the input) leaves allergies genuinely unchecked. Report every one that did
             // not reach a verdict as "missing": an empty response here is indistinguishable from a
             // completed check that found nothing, which is the failure this method exists to avoid.
-            logger.error("getAllergyWarnings failed for atcCode=" + atcCode, e);
+            logger.error("getAllergyWarnings failed for atcCode=" + drugAtcCode, e);
             markUncheckedAsMissing(allergies, results, missing, cleared);
         } finally {
-            JpaUtils.close(em);
+            if (em != null) {
+                JpaUtils.close(em);
+            }
         }
 
         ha.put("warnings", results);
