@@ -37,24 +37,79 @@ from **Administration → Update DrugRef Database**). The former `Update.jsp` br
 page has been removed: it ran the same import inline on an unauthenticated GET, with
 no CSRF protection and no in-progress guard.
 
+### XML-RPC: `getUpdateStatus()`
+Returns a struct describing the most recent attempt in this JVM: `state`
+(`IDLE`, `RUNNING`, `SUCCEEDED`, `FAILED`), `step`, `message`, `startedAt`,
+`finishedAt` and `lastUpdate`. Poll it after `updateDB()`: `getLastUpdateTime()`
+alone cannot distinguish an update that is still running from one that failed,
+and before this method existed a failed update was reported as `"updating"`
+indefinitely. See [api-reference.md](api-reference.md#database-management-methods).
+
+### Network requirements
+The worker fetches the archives itself with the JVM's HTTP client, so the
+DrugRef JVM needs outbound HTTPS to `www.canada.ca` (or to whatever
+`DPD_BASE_URL` names). Behind a proxy, set the standard JVM properties
+(`-Dhttps.proxyHost=... -Dhttps.proxyPort=...`); behind a TLS-intercepting
+proxy, add its CA to the JVM trust store. A server that cannot reach the site
+now fails the update cleanly during the download step, with the reason in
+`getUpdateStatus()`, and keeps its current dataset.
+
 ## Import Pipeline
 
-When triggered, `RxUpdateDBWorker.run()` executes these steps sequentially:
+When triggered, `RxUpdateDBWorker.run()` executes these steps sequentially. A
+failure at any step propagates to the worker, which restores the previous
+dataset (see **Failure handling** below) and records the reason.
 
-### Step 1: DPD Import (`DPDImport.doItDifferent()`)
+### Step 0: Download (`DpdDownloader.download()`)
 
-1. **Download** ZIP files from Health Canada using `getZipStream(url)`
-2. **Drop** all existing DPD tables if they exist:
-   - cd_drug_product, cd_companies, cd_active_ingredients, cd_drug_status, cd_form, cd_inactive_products, cd_packaging, cd_pharmaceutical_std, cd_route, cd_schedule, cd_therapeutic_class, cd_veterinary_species, interactions
-3. **Create** fresh tables with schema from `getDPDTables()`
-4. **Parse** CSV files from each ZIP using `RecordParser.getDPDObject()`:
+All three archives are fetched to temp files **before anything in the database
+is touched**, with connect and read timeouts, a `User-Agent`, an HTTP status
+check, a `Content-Length` check, and a test that each file opens as a non-empty
+ZIP. A 404, a proxy block page served with status 200, or a truncated transfer
+aborts the update here, at no cost.
+
+The earlier pipeline dropped every table first and opened each URL with a bare
+`URL.openStream()` whose failure was swallowed; a server that could not reach
+Health Canada was left with an empty drug database.
+
+### Step 0b: Table swap (`DpdTableSwap.backupLiveTables()`) — MySQL/MariaDB only
+
+Every table the import rebuilds (the thirteen `cd_*`/`interactions` tables plus
+`cd_drug_search` and `link_generic_brand`) is renamed to `<table>_prev`. The
+importer then creates fresh tables under the live names. `history` and
+`utility` are not swapped. Drug lookups are degraded while the import runs, as
+they always were; `getLastUpdateTime()` answers `"updating"` for the duration.
+
+Which half of the swap is in flight is recorded in a one-row `_carlos_drugref_swap`
+table, written before the first rename and cleared after the last drop. Neither the
+rename loop nor the drop loop is atomic, and the two partial states need opposite
+repairs: a `*_prev` set left by an interrupted **backup** is the only copy of the data
+and must be restored, while one left by an interrupted **discard** is a stale copy of
+data the import already replaced and must be finished off — restoring it would splice an
+old drug dataset into a new one. `recoverInterruptedSwap()` reads the marker and applies
+the matching repair; it runs at webapp start and again before each new swap.
+
+> **The swap assumes MySQL/MariaDB**, the only backend CARLOS deploys DrugRef against.
+> On PostgreSQL `ALTER TABLE ... RENAME TO` leaves the table's `serial` sequence under
+> the old name, so the importer's `CREATE TABLE ... id serial` collides with it. Running
+> DrugRef on PostgreSQL means fixing `DpdTableSwap` first.
+
+### Step 1: DPD Import (`DPDImport.importDpd()`)
+
+1. **Create** fresh tables with schema from `getDPDTables()` (any leftover live
+   table is dropped first)
+2. **Parse** CSV files from each ZIP using `RecordParser.getDPDObject()`:
    - Handles ISO-8859-1 to UTF-8 encoding conversion
    - Parses dates in `dd-MMM-yy` format (e.g., `03-DEC-2018`)
-   - Persists each record as a JPA entity
-5. **Import interactions** from `interactions-holbrook.txt` into the `interactions` table
-6. **Build search index** via `ConfigureSearchData.importSearchData()` (see below)
-7. **Create database indexes** on key columns for query performance
-8. Returns total execution time in milliseconds
+   - Persists each record as a JPA entity, flushing and clearing the persistence
+     context every 500 rows so the whole extract is never resident at once
+     (DrugRef shares its JVM with CARLOS in the Debian deployment)
+   - A parse failure aborts the update instead of being logged and skipped
+3. **Import interactions** from `interactions-holbrook.txt` into the `interactions` table
+4. **Build search index** via `ConfigureSearchData.importSearchData()` (see below)
+5. **Create database indexes** on key columns for query performance (an index
+   that cannot be created is logged and skipped; it affects speed, not data)
+6. Returns total execution time in milliseconds
 
 ### Step 2: Generic Drug Import (`TempNewGenericImport.run()`)
 
@@ -110,21 +165,48 @@ The `RecordParser` class handles CSV parsing from DPD ZIP files:
 - Monitors memory usage during bulk import
 - Entities parsed: CdDrugProduct, CdActiveIngredients, CdCompanies, CdDrugStatus, CdForm, CdInactiveProducts, CdPackaging, CdPharmaceuticalStd, CdRoute, CdSchedule, CdTherapeuticClass, CdVeterinarySpecies
 
+## Failure handling
+
+The worker wraps the whole pipeline. On any exception it:
+
+1. logs the failure with its stack trace,
+2. drops the partially built live tables and renames every `<table>_prev` back
+   (`DpdTableSwap.restoreBackupTables()`), so the dataset is exactly what it was,
+3. records `FAILED`, the step, and the root-cause message in `UpdateStatus`, and
+4. clears `Drugref.UPDATE_DB` in a `finally` block, so a failed update can be
+   retried without restarting DrugRef.
+
+The rollback window closes when the `history` row is written — the commit point, and
+deliberately the last fallible step. The `history` table is not swapped, so a row written
+before a step that later failed would survive the rollback and make `getLastUpdateTime()`
+report an abandoned attempt as the newest successful update. After that row is in, the new
+dataset is the good one: dropping the `_prev` set is best-effort and a failure there is
+logged, not rolled back.
+
+If the JVM exits mid-update (an out-of-memory exit, a service restart) the marker and the
+`_prev` set are still there at the next start; `StartUp` calls
+`DpdTableSwap.restoreIfInterrupted()` before Spring and Hibernate come up, which applies
+the repair the marker calls for, so schema validation and the first lookups see one
+complete dataset.
+
 ## Concurrency
 
 - The `Drugref.UPDATE_DB` static boolean flag prevents concurrent updates
-- `updateDB()` checks this flag before launching `RxUpdateDBWorker`
+- `updateDB()` checks and sets the flag under a lock before launching `RxUpdateDBWorker`
 - `getLastUpdateTime()` returns `"updating"` while the flag is set
-- The flag is cleared at the end of `RxUpdateDBWorker.run()`
+- The flag is cleared in the worker's `finally` block, whatever the outcome
 
 ## Key Files
 
 | File | Purpose |
 |------|---------|
+| `ca/dpd/fetch/DpdDownloader.java` | Fetches and validates the three archives before any table is touched |
+| `ca/dpd/fetch/DpdTableSwap.java` | Renames the live tables aside for the import, restores them on failure, and repairs an interrupted swap at startup |
 | `ca/dpd/fetch/DPDImport.java` | Main import orchestrator |
 | `ca/dpd/fetch/RecordParser.java` | CSV parser |
 | `ca/dpd/fetch/ConfigureSearchData.java` | Search index builder |
 | `ca/dpd/fetch/TempNewGenericImport.java` | Generic drug entry generator |
 | `ca/dpd/history/HistoryUtil.java` | Update history recording |
-| `util/RxUpdateDBWorker.java` | Background thread coordinator |
+| `util/RxUpdateDBWorker.java` | Background thread coordinator: download, swap, import, rollback |
+| `util/UpdateStatus.java` | Outcome of the last attempt, reported by `getUpdateStatus()` |
 | `src/main/resources/interactions-holbrook.txt` | Bundled interaction data |

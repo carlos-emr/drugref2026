@@ -16,10 +16,17 @@
  */
 package io.github.carlos_emr.drugref2026.util;
 
+import java.sql.SQLException;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+
+import org.apache.logging.log4j.Logger;
+
 import io.github.carlos_emr.drugref2026.Drugref;
 import io.github.carlos_emr.drugref2026.ca.dpd.fetch.DPDImport;
+import io.github.carlos_emr.drugref2026.ca.dpd.fetch.DpdDownloader;
+import io.github.carlos_emr.drugref2026.ca.dpd.fetch.DpdTableSwap;
 import io.github.carlos_emr.drugref2026.ca.dpd.fetch.TempNewGenericImport;
 import io.github.carlos_emr.drugref2026.ca.dpd.history.HistoryUtil;
 
@@ -30,72 +37,338 @@ import io.github.carlos_emr.drugref2026.ca.dpd.history.HistoryUtil;
  * <p>This thread is launched by {@link Drugref#updateDB()} and performs the following
  * sequential steps:
  * <ol>
- *   <li>Import raw DPD data from Health Canada (drug products, active ingredients,
- *       therapeutic classes, routes, forms, etc.)</li>
+ *   <li>Download and validate all three DPD archives ({@link DpdDownloader}). Nothing
+ *       in the database is touched until every archive is on local disk.</li>
+ *   <li>Move the current dataset aside as {@code *_prev} tables ({@link DpdTableSwap})</li>
+ *   <li>Import raw DPD data (drug products, active ingredients, therapeutic classes,
+ *       routes, forms, etc.) and build the search index</li>
  *   <li>Generate generic drug search entries from the imported data</li>
  *   <li>Flag ISMP (Institute for Safe Medication Practices) high-alert medications</li>
- *   <li>Record the update in the History table for auditing</li>
  *   <li>Enhance search data by adding descriptors and strength information to drug names</li>
- *   <li>Store update statistics (timing, row counts) in {@link Drugref#DB_INFO}</li>
+ *   <li>Check the rebuild is not empty, then move the swap marker to {@code DISCARD} — <b>the
+ *       commit point</b></li>
+ *   <li>Record the update in the History table for auditing</li>
+ *   <li>Store update statistics (timing, row counts) in {@link Drugref#DB_INFO} and discard
+ *       the {@code *_prev} tables</li>
  * </ol>
  *
- * <p>The {@link Drugref#UPDATE_DB} flag is set to {@code true} for the duration of the
- * update to prevent concurrent updates and to inform clients that data is being refreshed.
+ * <p>If any step up to and including the marker move fails, the {@code *_prev} tables are put
+ * back, so a failed update leaves the dataset exactly as it was. The marker move is the commit,
+ * not the history row: the history insert comes after it deliberately, because a crash between
+ * the two must leave the NEW data in place with a stale timestamp rather than a history row
+ * claiming an update that had been rolled back. So a history failure does <em>not</em> restore
+ * anything — the dataset is already committed and the run reports the failure with the new data
+ * live. Nothing after the marker can fail the run: the history row and the {@code *_prev} drop
+ * are both best-effort and report themselves in the success message instead. That keeps a
+ * {@code FAILED} status meaning exactly one thing — the update was abandoned and the previous
+ * dataset is what prescribers are searching — which is what the admin page tells the operator.
+ * The outcome, success or failure with its reason, is recorded in {@link UpdateStatus} for
+ * {@link Drugref#getUpdateStatus()}.
  *
- * @author jackson
+ * <p>The {@link Drugref#UPDATE_DB} flag is set for the duration of the update to prevent
+ * concurrent updates and to inform clients that data is being refreshed; it is cleared in
+ * a {@code finally} block so that no failure can leave it set.
  */
 public class RxUpdateDBWorker extends Thread{
 
+    private static final Logger logger = MiscUtils.getLogger();
+
     /** Default constructor. */
-    public RxUpdateDBWorker(){}
+    public RxUpdateDBWorker(){
+        super("drugref-update");
+    }
 
     /**
-     * Executes the full database update sequence. Synchronized on {@code this} to
-     * ensure the entire update runs atomically within this thread instance.
+     * Executes the full database update sequence: download, swap, import, post-process.
+     * Runs alone: {@link Drugref#updateDB()} refuses to start a second worker while
+     * {@link Drugref#UPDATE_DB} is set.
      */
+    @Override
     public void run(){
-        synchronized(this){
+        UpdateStatus status = UpdateStatus.get();
+        DpdTableSwap swap = new DpdTableSwap();
+        DpdDownloader.DpdArchives archives = null;
+        boolean previousDatasetMovedAside = false;
+        // Whether THIS run reached the commit point. A DISCARD marker alone does not mean this
+        // run committed -- a previous run whose cleanup failed leaves one behind -- and reading
+        // it that way would report a run that imported nothing as a success.
+        boolean commitAttempted = false;
+        long startedAt = System.currentTimeMillis();
+        try {
             // Set the global flag so other threads/requests know an update is in progress
-            Drugref.UPDATE_DB=true;
+            // UPDATE_DB and UpdateStatus.begin() are both set by Drugref.updateDB()
+            // under the class monitor, before this thread starts, so a client polling
+            // the moment updateDB() returns "running" already sees RUNNING.
+            logger.info("DrugRef database update started");
 
-            // Step 1: Import DPD (Drug Product Database) data from Health Canada.
-            // This downloads and imports drug products, active ingredients, therapeutic
-            // classes, routes, pharmaceutical forms, packaging, etc.
-            DPDImport dpdImport =new DPDImport();
-            long timeDataImport=0L;
-            timeDataImport=dpdImport.doItDifferent();
-            timeDataImport=(timeDataImport/1000)/60; // Convert milliseconds to minutes
+            // Step 1: fetch everything first. A download failure here costs nothing:
+            // the previous pipeline dropped every table BEFORE opening the first URL.
+            status.step("downloading Health Canada DPD archives");
+            archives = DpdDownloader.download(DPDImport.dpdBaseUrl());
 
-            // Step 2: Import generic drug entries. These are synthesized from the DPD data
-            // to allow searching by generic (non-proprietary) drug names.
-            TempNewGenericImport newGenericImport=new TempNewGenericImport();
-            long timeGenericImport=0L;
-            timeGenericImport=newGenericImport.run();//in miliseconds
-            timeGenericImport=(timeGenericImport/1000)/60; // Convert milliseconds to minutes
+            // Step 2: keep the current dataset as *_prev so a failure below can restore it.
+            // The flag goes up BEFORE the call, not after: backupLiveTables() renames
+            // fifteen tables one at a time, and a failure partway through leaves some of
+            // them moved. Setting the flag afterwards meant the catch block skipped the
+            // restore for exactly that case, and the next attempt would then drop those
+            // *_prev tables as stale -- discarding the only copy of the data.
+            status.step("moving the current dataset aside");
+            previousDatasetMovedAside = true;
+            swap.backupLiveTables();
 
-            // Step 3: Flag ISMP high-alert medications in the database.
-            // These drugs require special safeguards to reduce the risk of errors.
+            // Step 3: import the DPD data and build the search index
+            status.step("importing DPD data and building the search index");
+            DPDImport dpdImport = new DPDImport();
+            long timeDataImport = dpdImport.importDpd(archives);
+            timeDataImport = (timeDataImport / 1000) / 60; // Convert milliseconds to minutes
+
+            // Step 4: generic drug entries (categories 18/19), synthesized from the DPD data
+            status.step("generating generic search entries");
+            TempNewGenericImport newGenericImport = new TempNewGenericImport();
+            long timeGenericImport = newGenericImport.run(); // milliseconds
+            timeGenericImport = (timeGenericImport / 1000) / 60;
+
+            // Step 5: ISMP high-alert medication flags (TALLman lettering etc.)
+            status.step("applying ISMP medication safety names");
             dpdImport.setISMPmeds();
 
-            // Step 4: Record this update in the History table for audit trail.
-            HistoryUtil h=new HistoryUtil();
-            h.addUpdateHistory();
+            // Step 6: search-name enhancement (form descriptors, strengths). Still
+            // inside the rollback window -- these rewrite cd_drug_search, so a failure
+            // here leaves the search index half-enhanced and the update is abandoned.
+            status.step("enhancing search names");
+            HashMap hm = dpdImport.numberTableRows();
+            List<Integer> addedDescriptor = dpdImport.addDescriptorToSearchName();
+            List<Integer> addedStrength = dpdImport.addStrengthToBrandName();
 
-            // Step 5: Enhance search data -- add pharmaceutical form descriptors and
-            // strength values to drug search names for better search results.
-            HashMap hm=dpdImport.numberTableRows();
-            List<Integer> addedDescriptor=dpdImport.addDescriptorToSearchName();
-            List<Integer> addedStrength=dpdImport.addStrengthToBrandName();
+            // Step 7: THE COMMIT POINT. Moving the marker to DISCARD is a single atomic
+            // statement, and it is what makes the new dataset the good one -- not the
+            // history row. The order matters and is the opposite of the obvious one:
+            // between the history insert and the marker move there is a window, and a
+            // crash inside it must not be resolvable as "restore the old data", because
+            // the history row would then claim an update that had been rolled back. With
+            // the marker first, a crash in the window leaves the NEW data in place and a
+            // stale timestamp -- correct data with a pessimistic date, which is the safe
+            // direction for a drug database.
+            status.step("committing the new dataset");
+            requireNonEmptyRebuild(hm);
+            // Set BEFORE the call, for the same reason previousDatasetMovedAside is: the whole
+            // point of reading the marker afterwards is that markDiscarding() can commit on the
+            // server and still throw on the way back, so a flag set after it returns would be
+            // false in exactly the case it needs to be true.
+            commitAttempted = true;
+            swap.markDiscarding();
+            previousDatasetMovedAside = false;
 
-            // Step 6: Store update statistics for display via the admin interface.
+            // Step 8: record the update in the History table, which is what
+            // getLastUpdateTime() reports. The history table is not swapped, so this
+            // comes after every step that could still have abandoned the update.
+            //
+            // Best-effort, and it must be: the marker moved a moment ago, so the new dataset
+            // IS the live one and there is nothing left to roll back. Throwing here used to
+            // report the run as FAILED, which the admin page renders as "the previous drug
+            // data was kept" -- a statement that is false past the commit point, and the
+            // worst kind of false, because it tells the operator to expect the old data
+            // while the new data is what prescribers are searching. A missing history row
+            // costs a stale "last updated" date on correct data, which is the pessimistic
+            // direction the commit ordering was chosen for in the first place.
+            status.step("recording update history");
+            String historyCaveat = recordUpdateHistory();
+
+            // Step 9: statistics for the admin interface, then let go of the old dataset
             Drugref.DB_INFO.put("tableRowNum", hm);
             Drugref.DB_INFO.put("timeImportDataMinutes", timeDataImport);
             Drugref.DB_INFO.put("timeImportGenericMinutes", timeGenericImport);
             Drugref.DB_INFO.put("descriptor", addedDescriptor);
             Drugref.DB_INFO.put("strength", addedStrength);
 
-            // Clear the update flag so the system returns to normal operation
-            Drugref.UPDATE_DB=false;
+            // Step 10: drop the previous dataset. Best-effort by design: the update is
+            // already committed, so a failure here leaves harmless *_prev tables that
+            // the next start (or the next update) clears, and must not fail the run.
+            status.step("discarding the previous dataset");
+            try {
+                swap.discardBackupTables();
+            } catch (SQLException | RuntimeException e) {
+                logger.warn("DrugRef update: the update succeeded but the previous dataset could not be"
+                        + " dropped; the " + DpdTableSwap.BACKUP_SUFFIX + " tables will be cleared on the"
+                        + " next start", e);
+            }
+
+            long minutes = (System.currentTimeMillis() - startedAt) / 60000L;
+            String summary = "updated in " + minutes + " min; " + hm.get("CdDrugProduct") + " products, "
+                    + hm.get("CdDrugSearch") + " search entries" + historyCaveat;
+            status.succeed(summary);
+            logger.info("DrugRef database update finished: " + summary);
+        } catch (Throwable t) {
+            // Throwable, so that an Error still gets the dataset put back -- but see the
+            // rethrow at the end of this block: a fatal Error is not swallowed.
+            // Every failure is reported: the thread used to die on an uncaught exception
+            // with UPDATE_DB still true, and clients saw "updating" forever.
+            logger.error("DrugRef database update failed during '" + status.getStep() + "'", t);
+            String reason = "failed during '" + status.getStep() + "': " + describe(t);
+            boolean committedAfterAll = false;
+            if (previousDatasetMovedAside) {
+                try {
+                    // recoverInterruptedSwap(), not restoreBackupTables(): the marker
+                    // decides, not this flag. markDiscarding() can commit on the server and
+                    // still throw on the way back (the connection dropping after the UPDATE
+                    // lands is enough), and the flag is only cleared once the call returns
+                    // normally. A blind restore in that window put the previous dataset back
+                    // over one the marker had already accepted -- the exact splice the
+                    // commit point exists to prevent. Reading the marker resolves all three
+                    // cases: BACKUP restores, DISCARD finishes the cleanup, and a failure
+                    // before the marker moved still reads BACKUP and restores as before.
+                    DpdTableSwap.SwapRecovery recovery = swap.recoverInterruptedSwap();
+                    // Both halves are required. recovery.committed() alone would treat a stale
+                    // DISCARD left by an earlier run's failed cleanup as this run's success --
+                    // and this run may have failed before importing anything at all, since
+                    // backupLiveTables() refuses to start on top of an unresolved swap.
+                    committedAfterAll = commitAttempted && recovery.committed();
+                    reason += " -- " + recovery.description();
+                } catch (Exception restoreFailure) {
+                    logger.error("DrugRef: could not restore the previous dataset after the failed update",
+                            restoreFailure);
+                    reason += " -- AND the previous dataset could NOT be restored: "
+                            + describe(restoreFailure) + "; reload the drug reference seed";
+                }
+            } else if (commitAttempted) {
+                // The third way into this block, and the one with no marker to read: the flag
+                // is cleared on the line AFTER markDiscarding(), so reaching here with the
+                // commit attempted means that call returned normally and the new dataset is
+                // unambiguously live. What failed was a step past the commit point -- the row
+                // counts going into DB_INFO, or the success message itself. Rare, but the
+                // recovery block above is skipped entirely for it, and without this the run
+                // would be reported as FAILED with the new data live: the same defect as the
+                // marker case, reached by a route that never touches the marker.
+                committedAfterAll = true;
+            }
+            if (committedAfterAll) {
+                // The marker had already accepted the new dataset, so this is a committed
+                // update that threw on the way back -- not an abandoned one. Reporting FAILED
+                // here would render on the admin page as "the previous drug data was kept",
+                // which is false: prescribers are searching the NEW data. The commit ordering
+                // was chosen so this window resolves to correct data with a possibly stale
+                // date, and the status has to say that rather than contradict the database and
+                // invite a retry of an update that already succeeded. The history row was
+                // never reached, so write it here, best-effort, exactly as the happy path does.
+                //
+                // This holds for an Error too. The rethrow below still happens -- the JVM's
+                // health is a separate question from which dataset is live -- but the status
+                // is the operator's only account of the data, and on that question a committed
+                // update is a committed update however the process died afterwards.
+                String recoveredCaveat = recordUpdateHistory();
+                long minutes = (System.currentTimeMillis() - startedAt) / 60000L;
+                String summary = "updated in " + minutes + " min, but the run did not finish"
+                        + " cleanly after the new dataset was committed (" + reason + ")."
+                        + " The new drug data IS live" + recoveredCaveat;
+                status.succeed(summary);
+                logger.warn("DrugRef database update committed despite a failure after the commit"
+                        + " point: " + summary);
+            } else {
+                status.fail(reason);
+            }
+            if (t instanceof Error) {
+                // OutOfMemoryError and friends mean the JVM is in no state to keep
+                // serving. The rollback above was the best-effort part; the process
+                // must not carry on as though this were an ordinary failed update.
+                // The finally below still runs, so the flag is cleared either way.
+                throw (Error) t;
+            }
+        } finally {
+            if (archives != null) {
+                archives.deleteAll();
+            }
+            // Clear the update flag so the system returns to normal operation. UPDATE_DB is
+            // volatile, so a reader outside the lock sees this write regardless; the monitor
+            // is here because updateDB() tests the flag and starts a worker under it, and
+            // this clear has to be serialized against that check-then-act or a retry racing
+            // the end of this run could start a second worker.
+            synchronized (Drugref.class) {
+                Drugref.UPDATE_DB = false;
+            }
         }
+    }
+
+    /**
+     * Writes the update-history row, best effort, and reports what to tell the operator.
+     *
+     * <p>Best-effort by design, and it must be: it runs only past the commit point, where the
+     * marker has already made the new dataset the live one and there is nothing left to roll
+     * back. Throwing here used to report the run as {@code FAILED}, which the admin page renders
+     * as "the previous drug data was kept" -- a statement that is false past the commit point,
+     * and the worst kind of false, because it tells the operator to expect the old data while
+     * the new data is what prescribers are searching. A missing history row costs a stale
+     * "last updated" date on correct data, which is the pessimistic direction the commit
+     * ordering was chosen for in the first place.
+     *
+     * @return an empty string when the row was written, or a caveat to append to the success
+     *         message. The caveat is hedged on purpose: a commit that lands on the server and
+     *         then loses the connection reports as a failure here, so "was not confirmed" is
+     *         the strongest thing that can honestly be said about the date.
+     */
+    private static String recordUpdateHistory() {
+        String caveat = "";
+        try {
+            if (!new HistoryUtil().addUpdateHistory()) {
+                caveat = "; the update history row could not be confirmed as written, so the"
+                        + " reported \"last updated\" date may still show the previous run";
+            }
+        } catch (RuntimeException e) {
+            logger.warn("DrugRef update: the new dataset is committed but the history row"
+                    + " could not be confirmed as written; the reported last-update date"
+                    + " may be stale", e);
+            caveat = "; the update history row could not be confirmed as written ("
+                    + describe(e) + "), so the reported \"last updated\" date may still show"
+                    + " the previous run";
+        }
+        if (!caveat.isEmpty()) {
+            logger.warn("DrugRef update: committed, but the history row was not confirmed");
+        }
+        return caveat;
+    }
+
+    /** The tables an update that worked cannot leave empty, whatever else it did. */
+    private static final String[] MUST_NOT_BE_EMPTY = {"CdDrugProduct", "CdDrugSearch"};
+
+    /**
+     * Refuses to commit a rebuild that produced no drugs.
+     *
+     * <p>The last thing standing between an empty import and the destruction of the previous
+     * dataset. Every step before this reports failure by throwing, so the worker's own rollback
+     * covers them — but a step that fails <em>silently</em> and returns normally reaches the
+     * commit point, and past it {@link DpdTableSwap#discardBackupTables()} drops the
+     * {@code *_prev} tables that are the only remaining copy of the drug data. The row counts
+     * are already in hand ({@link DPDImport#numberTableRows()} runs a step earlier and feeds the
+     * success message), so the check costs nothing; it simply was not being made, and the run
+     * would announce "0 products" as a success while deleting the backup.
+     *
+     * <p>Deliberately a floor of zero rather than a plausibility threshold: this guards against
+     * a broken pipeline, not against Health Canada publishing a short extract, and a worker that
+     * second-guesses a genuinely smaller dataset would be its own outage. It runs before the
+     * marker moves, so the throw lands in the rollback window and the previous dataset comes
+     * back.
+     *
+     * @param rowCounts entity-name to row-count, from {@link DPDImport#numberTableRows()}
+     * @throws IllegalStateException if a table an update cannot legitimately empty is empty
+     */
+    static void requireNonEmptyRebuild(Map<String, ?> rowCounts) {
+        for (String table : MUST_NOT_BE_EMPTY) {
+            Object count = rowCounts == null ? null : rowCounts.get(table);
+            long rows = count instanceof Number ? ((Number) count).longValue() : -1L;
+            if (rows == 0L) {
+                throw new IllegalStateException("the rebuilt " + table + " table is empty, so the"
+                        + " import produced no drug data; abandoning the update and keeping the"
+                        + " previous dataset rather than discarding it");
+            }
+        }
+    }
+
+    /** Root-cause text for the operator: the innermost message, prefixed by the exception type. */
+    public static String describe(Throwable t) {
+        Throwable root = t;
+        while (root.getCause() != null && root.getCause() != root) {
+            root = root.getCause();
+        }
+        String message = root.getMessage() == null ? "" : root.getMessage();
+        return root.getClass().getSimpleName() + (message.isEmpty() ? "" : ": " + message);
     }
 }

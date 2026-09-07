@@ -63,7 +63,7 @@ public class CdTherapeuticClass implements Serializable {
     private Integer drugCode;
     @Column(name = "tc_atc_number", length = 8)
     private String tcAtcNumber;
-    @Column(name = "tc_atc", length = 120)
+    @Column(name = "tc_atc", length = 200)
     private String tcAtc;
     @Column(name = "tc_ahfs_number", length = 20)
     private String tcAhfsNumber;

@@ -88,11 +88,11 @@ public class CdDrugProduct implements Serializable {
     private String productCategorization;
     @Column(name = "class", length = 40)
     private String class1;
-    @Column(name = "drug_identification_number", length = 255)
+    @Column(name = "drug_identification_number", length = 40)
     private String drugIdentificationNumber;
-    @Column(name = "brand_name", length = 200)
+    @Column(name = "brand_name", length = 255)
     private String brandName;
-    @Column(name="descriptor",length=150)
+    @Column(name="descriptor",length=255)
     private String descriptor;
     @Column(name = "pediatric_flag")
     private String pediatricFlag;

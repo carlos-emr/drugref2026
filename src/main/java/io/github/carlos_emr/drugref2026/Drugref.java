@@ -37,6 +37,7 @@ import io.github.carlos_emr.drugref2026.ca.dpd.History;
 import io.github.carlos_emr.drugref2026.util.JpaUtils;
 import io.github.carlos_emr.drugref2026.util.RxUpdateDBWorker;
 import io.github.carlos_emr.drugref2026.util.SpringUtils;
+import io.github.carlos_emr.drugref2026.util.UpdateStatus;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.Logger;
 import io.github.carlos_emr.drugref2026.util.MiscUtils;
@@ -75,7 +76,13 @@ public class Drugref {
         public static HashMap<String,Object> DB_INFO=new HashMap<String,Object>();
 
         /** Flag indicating whether a database update is currently in progress. Used to prevent concurrent updates. */
-        public static Boolean UPDATE_DB=false;
+        /**
+         * Set while an update is in progress. {@code volatile} because it is written by
+         * the worker thread and read without the monitor by {@link #getLastUpdateTime()}:
+         * a stale {@code true} there answers "updating" forever, and a stale {@code false}
+         * lets a second update start over the first.
+         */
+        public static volatile boolean UPDATE_DB=false;
 
         private static Logger logger = MiscUtils.getLogger();
         
@@ -159,18 +166,52 @@ public class Drugref {
             if(UPDATE_DB){
                 return "updating";
             }else{
+                return queryLastUpdateTime();
+            }
+        }
 
-                EntityManager em = JpaUtils.createEntityManager();
+        /** The newest {@code history} row's timestamp, or {@code null} when there is none. */
+        private String queryLastUpdateTime() {
+            EntityManager em = JpaUtils.createEntityManager();
+            try {
                 String queryStr="select h from History h where h.id=(select max(h2.id) from History h2)";
                 Query query = em.createQuery(queryStr);
                 List<History> results = query.getResultList();
-                JpaUtils.close(em);
                 if(results!=null && results.size()>0){
                     return results.get(0).getDateTime().toString();
                 }
-                else
-                    return null;
+                return null;
+            } finally {
+                JpaUtils.close(em);
             }
+        }
+
+        /**
+         * Reports the outcome of the most recent database update attempt in this JVM.
+         *
+         * <p>{@link #getLastUpdateTime()} can only say "updating" or give a date; it
+         * cannot say that the last attempt failed, or why. This struct can. Keys:
+         * <ul>
+         *   <li>{@code state}: {@code IDLE}, {@code RUNNING}, {@code SUCCEEDED} or {@code FAILED}</li>
+         *   <li>{@code step}: the pipeline step in progress, or the one that failed</li>
+         *   <li>{@code message}: a summary on success, the reason on failure</li>
+         *   <li>{@code startedAt}, {@code finishedAt}: {@code yyyy-MM-dd HH:mm:ss}, or empty</li>
+         *   <li>{@code lastUpdate}: the newest history timestamp, or empty; never "updating"</li>
+         * </ul>
+         * All values are strings.
+         *
+         * @return the status struct
+         */
+        public Hashtable<String,Object> getUpdateStatus(){
+            Hashtable<String,Object> status = UpdateStatus.get().toStruct();
+            String lastUpdate = null;
+            try {
+                lastUpdate = queryLastUpdateTime();
+            } catch (RuntimeException e) {
+                logger.warn("could not read the update history", e);
+            }
+            status.put("lastUpdate", lastUpdate == null ? "" : lastUpdate);
+            return status;
         }
         
         /**
@@ -180,16 +221,49 @@ public class Drugref {
          * Only one update can run at a time; if an update is already in progress,
          * returns "updating" without starting a new one.
          *
-         * @return "running" if a new update was started, or "updating" if one is already in progress
+         * @return "running" if a new update was started, "updating" if one is already in
+         *         progress, or "error" if the worker thread could not be started
          */
         public String updateDB(){
-            if(!UPDATE_DB){
-                RxUpdateDBWorker worker = new RxUpdateDBWorker();
-                worker.start();                
-                return "running";
-            }else{                
-                return "updating";
+            // Guarded by the class monitor and the flag set here rather than in the
+            // worker: two requests arriving together used to both pass the check and
+            // start two workers rebuilding the same tables.
+            synchronized (Drugref.class) {
+                if (UPDATE_DB || UpdateStatus.get().isRunning()) {
+                    return "updating";
+                }
+                UPDATE_DB = true;
+                // Marked RUNNING here, not in the worker: clients are told to poll
+                // getUpdateStatus() as soon as updateDB() answers "running", and the
+                // worker needs a moment to reach its first statement. Doing it there left
+                // a window in which the poll returned the PREVIOUS run's terminal state --
+                // so a page could report the last update as SUCCEEDED or FAILED while the
+                // new one was in fact starting.
+                UpdateStatus.get().begin();
             }
+
+            try {
+                RxUpdateDBWorker worker = new RxUpdateDBWorker();
+                worker.start();
+            } catch (Throwable t) {
+                // The flag is cleared in the worker's finally -- which never runs if the
+                // thread was never started (Thread.start() throws OutOfMemoryError when the
+                // JVM cannot create a native thread). Without this the service would report
+                // "updating" until it was restarted, with nothing actually running.
+                // Publish the failure and release the flag together, so a retry that gets
+                // in cannot have its own RUNNING state overwritten by this failure.
+                synchronized (Drugref.class) {
+                    UpdateStatus.get().fail("could not start the update worker: "
+                            + RxUpdateDBWorker.describe(t));
+                    UPDATE_DB = false;
+                }
+                logger.error("DrugRef: could not start the update worker", t);
+                if (t instanceof Error) {
+                    throw (Error) t;
+                }
+                return "error";
+            }
+            return "running";
         }
 
         /**

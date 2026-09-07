@@ -18,7 +18,6 @@
 package io.github.carlos_emr.drugref2026.ca.dpd.fetch;
 
 import java.io.*;
-import java.net.URL;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.DriverManager;
@@ -67,7 +66,7 @@ import io.github.carlos_emr.drugref2026.util.MiscUtils;
  *       strength and descriptor information to brand name search entries.</li>
  * </ol>
  *
- * <p>The main entry point is {@link #doItDifferent()}, which executes the full pipeline
+ * <p>The main entry point is {@link #importDpd(DpdDownloader.DpdArchives)}, which executes the full pipeline
  * and returns the elapsed time in milliseconds.</p>
  *
  * @author jaygallagher
@@ -76,68 +75,16 @@ public class DPDImport {
 
 
     private static Logger logger = MiscUtils.getLogger();
-    String dpd_url = DrugrefProperties.getInstance().getProperty("DPD_BASE_URL", "https://www.canada.ca/content/dam/hc-sc/documents/services/drug-product-database");
-    /**
-     * Downloads the main DPD ZIP file ({@code allfiles.zip}) containing all active drug product
-     * CSV data files from Health Canada's website.
-     *
-     * @return a temporary File containing the downloaded ZIP archive
-     * @throws Exception if the download or file creation fails
-     */
-    public File getZipStream() throws Exception {
-        String sUrl = dpd_url + "/allfiles.zip";
-        return getZipStream(sUrl);
-    }
+    /** Health Canada's DPD extract directory, overridable with the {@code DPD_BASE_URL} property. */
+    public static final String DEFAULT_DPD_BASE_URL =
+            "https://www.canada.ca/content/dam/hc-sc/documents/services/drug-product-database";
 
     /**
-     * Downloads the inactive products detail ZIP file ({@code Allfiles_ia-Oct10.zip}) from
-     * Health Canada. This contains supplementary CSV data for inactive/discontinued products.
-     *
-     * <p>Note: This file is a legacy format from 2018. The code should be updated to handle
-     * the newer {@code Allfiles_ia.zip} format.</p>
-     *
-     * @return a temporary File containing the downloaded ZIP archive
-     * @throws Exception if the download or file creation fails
+     * @return the directory URL the three DPD archives are fetched from: the
+     *         {@code DPD_BASE_URL} property when set, else Health Canada's own site
      */
-    public File getInactiveZipStream() throws Exception {
-            String sUrl = dpd_url + "/Allfiles_ia-Oct10.zip";
-            // WARNING Allfiles_ia-Oct10.zip is data from 2018, code should be updated to handle new format in Allfiles_ia.zip
-                    return getZipStream(sUrl);
-    }
-
-    /**
-     * Downloads the inactive products summary ZIP file ({@code inactive.zip}) containing the
-     * {@code inactive.txt} CSV file with basic discontinued product information (DIN, brand name,
-     * cancellation date).
-     *
-     * @return a temporary File containing the downloaded ZIP archive
-     * @throws Exception if the download or file creation fails
-     */
-    public File getInactiveTableZipStream() throws Exception {
-        String sUrl = dpd_url + "/inactive.zip";
-        return getZipStream(sUrl);
-    }
-
-    private File getZipStream(String sUrl) throws IOException {
-        // Get stream from URL
-        URL url = new URL(sUrl);
-        InputStream is = url.openStream();
-
-        // Create output on local disk
-        File f = File.createTempFile("stream", ".zip");
-        FileOutputStream fos = new FileOutputStream(f);
-
-        // Copy contents to disk
-        try {
-            IOUtils.copy(is, fos);
-        } catch(IOException e) {
-            System.out.println("Could not open stream temp file");
-        } finally {
-            is.close();
-            fos.flush();
-            fos.close();
-        }
-        return f;
+    public static String dpdBaseUrl() {
+        return DrugrefProperties.getInstance().getProperty("DPD_BASE_URL", DEFAULT_DPD_BASE_URL);
     }
 
     /**
@@ -202,19 +149,25 @@ public class DPDImport {
      * @return a list of SQL CREATE TABLE statements
      */
     public List getDPDTables() {
+        // Column widths are sized against Health Canada's CURRENT extract with headroom,
+        // not against the published spec: MariaDB runs in strict mode, so a single value
+        // wider than its column aborts that file's import. PRODUCT_INFORMATION (223 chars
+        // in the 2026 package.txt against a varchar(80)) and inactive-product DINs (29
+        // chars against a varchar(8)) were the two that did. Keep the JPA @Column lengths
+        // in the ca.dpd entities in step with these.
         List<String> arrList = new ArrayList();
 
-        arrList.add("CREATE TABLE  cd_drug_product  (id serial  PRIMARY KEY,drug_code  int default NULL,product_categorization  varchar(80) default NULL,   class  varchar(40) default NULL,   drug_identification_number  varchar(8) default NULL,   brand_name  varchar(200) default NULL, descriptor varchar(150) default NULL, pediatric_flag  char(1) default NULL,   accession_number  varchar(5) default NULL,   number_of_ais  varchar(10) default NULL,   last_update_date  date default NULL,ai_group_no  varchar(10) default NULL,company_code int);");
-        arrList.add("CREATE TABLE  cd_companies  (id serial  PRIMARY KEY,   drug_code   int default NULL,   mfr_code  varchar(5) default NULL,   company_code   int default NULL,   company_name  varchar(80) default NULL,   company_type  varchar(40) default NULL,   address_mailing_flag  char(1) default NULL,   address_billing_flag  char(1) default NULL,   address_notification_flag  char(1) default NULL,   address_other  varchar(20) default NULL,   suite_number  varchar(20) default NULL,   street_name  varchar(80) default NULL,   city_name  varchar(60) default NULL,   province  varchar(40) default NULL,   country  varchar(40) default NULL,   postal_code  varchar(20) default NULL,   post_office_box  varchar(15) default NULL);");
+        arrList.add("CREATE TABLE  cd_drug_product  (id serial  PRIMARY KEY,drug_code  int default NULL,product_categorization  varchar(80) default NULL,   class  varchar(40) default NULL,   drug_identification_number  varchar(40) default NULL,   brand_name  varchar(255) default NULL, descriptor varchar(255) default NULL, pediatric_flag  char(1) default NULL,   accession_number  varchar(5) default NULL,   number_of_ais  varchar(10) default NULL,   last_update_date  date default NULL,ai_group_no  varchar(10) default NULL,company_code int);");
+        arrList.add("CREATE TABLE  cd_companies  (id serial  PRIMARY KEY,   drug_code   int default NULL,   mfr_code  varchar(5) default NULL,   company_code   int default NULL,   company_name  varchar(120) default NULL,   company_type  varchar(40) default NULL,   address_mailing_flag  char(1) default NULL,   address_billing_flag  char(1) default NULL,   address_notification_flag  char(1) default NULL,   address_other  varchar(20) default NULL,   suite_number  varchar(20) default NULL,   street_name  varchar(120) default NULL,   city_name  varchar(80) default NULL,   province  varchar(40) default NULL,   country  varchar(40) default NULL,   postal_code  varchar(20) default NULL,   post_office_box  varchar(15) default NULL);");
         arrList.add("CREATE TABLE  cd_active_ingredients  ( id serial  PRIMARY KEY,  drug_code   int default NULL,   active_ingredient_code   int default NULL,   ingredient  varchar(240) default NULL,   ingredient_supplied_ind  char(1) default NULL,   strength  varchar(20) default NULL,   strength_unit  varchar(40) default NULL,   strength_type  varchar(40) default NULL,   dosage_value  varchar(20) default NULL,   base  char(1) default NULL,   dosage_unit  varchar(40) default NULL,   notes  text);");
         arrList.add("CREATE TABLE  cd_drug_status  (id serial  PRIMARY KEY,   drug_code   int default NULL,   current_status_flag  char(1) default NULL,   status  varchar(40) default NULL,   history_date  date default NULL);");
         arrList.add("CREATE TABLE  cd_form  (id serial  PRIMARY KEY,   drug_code   int default NULL,   pharm_cd_form_code   int default NULL,   pharmaceutical_cd_form  varchar(65) default NULL);");
         arrList.add("CREATE TABLE  cd_inactive_products  (id serial  PRIMARY KEY,   drug_code   int default NULL,   drug_identification_number  varchar(255) default NULL,   brand_name  varchar(200) default NULL,   history_date  date default NULL);");
-        arrList.add("CREATE TABLE  cd_packaging  (id serial  PRIMARY KEY,   drug_code   int default NULL,   upc  varchar(12) default NULL,   package_size_unit  varchar(40) default NULL,   package_type  varchar(40) default NULL,   package_size  varchar(5) default NULL,   product_inforation  varchar(80) default NULL);");
+        arrList.add("CREATE TABLE  cd_packaging  (id serial  PRIMARY KEY,   drug_code   int default NULL,   upc  varchar(12) default NULL,   package_size_unit  varchar(40) default NULL,   package_type  varchar(40) default NULL,   package_size  varchar(20) default NULL,   product_inforation  varchar(255) default NULL);");
         arrList.add("CREATE TABLE  cd_pharmaceutical_std  (id serial  PRIMARY KEY,   drug_code   int default NULL,   pharmaceutical_std  varchar(40) default NULL);");
-        arrList.add("CREATE TABLE  cd_route  (id serial  PRIMARY KEY,   drug_code   int default NULL,   route_of_administration_code   int default NULL,   route_of_administration  varchar(40) default NULL);");
+        arrList.add("CREATE TABLE  cd_route  (id serial  PRIMARY KEY,   drug_code   int default NULL,   route_of_administration_code   int default NULL,   route_of_administration  varchar(80) default NULL);");
         arrList.add("CREATE TABLE  cd_schedule  (id serial  PRIMARY KEY,   drug_code   int default NULL,   schedule  varchar(40) default NULL);");
-        arrList.add("CREATE TABLE  cd_therapeutic_class  (id serial  PRIMARY KEY,   drug_code   int default NULL,   tc_atc_number  varchar(8) default NULL,   tc_atc  varchar(120) default NULL,   tc_ahfs_number  varchar(20) default NULL,   tc_ahfs  varchar(80) default NULL,	tc_atc_f  varchar(240) default NULL);");
+        arrList.add("CREATE TABLE  cd_therapeutic_class  (id serial  PRIMARY KEY,   drug_code   int default NULL,   tc_atc_number  varchar(8) default NULL,   tc_atc  varchar(200) default NULL,   tc_ahfs_number  varchar(20) default NULL,   tc_ahfs  varchar(80) default NULL,	tc_atc_f  varchar(240) default NULL);");
         arrList.add("CREATE TABLE  cd_veterinary_species  (id serial  PRIMARY KEY,   drug_code   int default NULL,   vet_species  varchar(80) default NULL,   vet_sub_species  varchar(80) default NULL);");
       
         arrList.add("CREATE TABLE  interactions  (id serial PRIMARY KEY, affectingatc varchar(8), affectedatc varchar(8) default NULL, effect char(1) default NULL, significance char(1) default NULL, evidence char(1) default NULL, comment text default NULL, affectingdrug text default NULL, affecteddrug text default NULL, CONSTRAINT UNQ_ATC_EFFECT UNIQUE (affectingatc, affectedatc, effect));");
@@ -450,25 +403,57 @@ public class DPDImport {
 
 
         /*DPDImport imp = new DPDImport();
-        long timeTaken = imp.doItDifferent();  // executeOn(entities);
+        long timeTaken = imp.importDpd(DpdDownloader.download(DPDImport.dpdBaseUrl()));
         System.out.println("GOING OUT after " + timeTaken);*/
         //DPDImport imp = new DPDImport();
         //imp.addStrengthToBrandName();
        // imp.addDescriptorToSearchName();
     }
 
+    /**
+     * Executes a list of native SQL statements in the caller's transaction. Any failure
+     * propagates, which is what lets the worker roll the update back.
+     */
     private void insertLines(EntityManager entityManager, List<String> sqlLines) {
-
         for (String sql : sqlLines) {
-            p("sql", sql);
             logger.debug(sql);
-            Query query = entityManager.createNativeQuery(sql);
+            entityManager.createNativeQuery(sql).executeUpdate();
+        }
+    }
+
+    /**
+     * Executes each statement in a transaction of its own, tolerating a failed
+     * {@code CREATE INDEX}.
+     *
+     * <p>An index that cannot be created (already present, or a name clash) costs query
+     * speed but not data, so it should not abandon a completed import. Catching the
+     * exception is not enough on its own, though: after a SQL error the JPA provider can
+     * mark the surrounding transaction rollback-only, so the eventual commit throws and
+     * the "tolerated" failure kills the import anyway. Giving each statement its own
+     * transaction is what actually makes the tolerance work.
+     *
+     * <p>Only index statements are tolerated. Anything else in the list — the
+     * {@code company_code} back-fill that ships alongside them, for one — still
+     * propagates.
+     */
+    private void insertLinesTolerantly(EntityManager entityManager, List<String> sqlLines) {
+        for (String sql : sqlLines) {
+            logger.debug(sql);
+            EntityTransaction tx = entityManager.getTransaction();
+            tx.begin();
             try {
-                query.executeUpdate();
-            } catch (Exception e) { //org.postgresql.util.PSQLException
-                //String getMsg = e.getMessage();
-                // System.out.println("ERROR :"+getMsg);
-                e.printStackTrace();
+                entityManager.createNativeQuery(sql).executeUpdate();
+                tx.commit();
+            } catch (RuntimeException e) {
+                if (tx.isActive()) {
+                    tx.rollback();
+                }
+                if (sql.trim().toLowerCase(java.util.Locale.ROOT).startsWith("create index")) {
+                    logger.warn("DrugRef update: index statement failed, continuing without it: " + sql
+                            + " (" + e.getMessage() + ")");
+                } else {
+                    throw e;
+                }
             }
         }
     }
@@ -686,14 +671,11 @@ public class DPDImport {
 	                }
                 } else {
                 	 if (!entry.isDirectory()) {
-                         InputStream is = null;
-                         try {
-	                         is = drugZip.getInputStream(entry);
+                         // A parse failure here used to be logged and skipped, which left
+                         // e.g. cd_drug_product empty while the rest of the import "succeeded".
+                         // Let it propagate so the worker restores the previous dataset.
+                         try (InputStream is = drugZip.getInputStream(entry)) {
 	                         RecordParser.getDPDObject(entry.getName(), is, em);
-                         }catch(Exception e) {
-                        	 MiscUtils.getLogger().error("Error",e);
-                         } finally {
-                        	 IOUtils.closeQuietly(is);
                          }
                      }
                 }
@@ -705,41 +687,45 @@ public class DPDImport {
         	}
         }
 
-        // Remove temporary file
-        if(!drugFile.delete()) {
-            System.err.println("Could not delete temporary stream file");
-        }
+        // The archive is a DpdArchives temp file; the worker deletes the set when the update ends.
     }
 
     /**
-     * Executes the complete DPD import pipeline: download, drop/create tables, parse CSVs,
-     * import interactions, build search index, create indexes, and apply post-processing.
+     * Executes the DPD import pipeline against archives that have already been
+     * downloaded and validated: create tables, parse CSVs, import interactions,
+     * build the search index, create indexes.
      *
-     * <p>This is the main entry point for a full database refresh. The pipeline steps are:</p>
+     * <p>The caller ({@link io.github.carlos_emr.drugref2026.util.RxUpdateDBWorker})
+     * has moved the previous dataset aside with {@link DpdTableSwap} before this
+     * runs, so every table this method creates is new. Nothing here catches and
+     * continues: any failure propagates so the worker can put the previous
+     * dataset back. The pipeline steps are:</p>
      * <ol>
-     *   <li>Drop existing DPD tables and recreate with fresh schema</li>
-     *   <li>Download and parse active products ({@code allfiles.zip})</li>
-     *   <li>Download and parse inactive product details ({@code Allfiles_ia-Oct10.zip})</li>
-     *   <li>Download and parse inactive products summary ({@code inactive.zip})</li>
-     *   <li>Load Holbrook drug-drug interaction data from bundled resource</li>
-     *   <li>Drop and recreate search index tables</li>
+     *   <li>Drop any leftover DPD tables and create fresh ones</li>
+     *   <li>Parse active products ({@code allfiles.zip})</li>
+     *   <li>Parse inactive product details ({@code Allfiles_ia-Oct10.zip})</li>
+     *   <li>Parse inactive products summary ({@code inactive.zip})</li>
+     *   <li>Load Holbrook drug-drug interaction data from the bundled resource</li>
+     *   <li>Create the search index tables</li>
      *   <li>Add database indexes to all DPD tables</li>
-     *   <li>Build search index via {@link ConfigureSearchData}</li>
-     *   <li>Add indexes to search table</li>
+     *   <li>Build the search index via {@link ConfigureSearchData}</li>
+     *   <li>Add indexes to the search table</li>
      * </ol>
      *
+     * @param archives the downloaded DPD archives
      * @return elapsed time in milliseconds for the entire import
+     * @throws Exception on any download-content, parse, or SQL failure
      */
-    public long doItDifferent() {
+    public long importDpd(DpdDownloader.DpdArchives archives) throws Exception {
         long startTime = System.currentTimeMillis();
         EntityManager entityManager = JpaUtils.createEntityManager();
         try {
             EntityTransaction tx = entityManager.getTransaction();
             tx.begin();
 
-            // Step 1: Drop existing DPD tables and recreate with fresh schema
+            // Step 1: Drop any leftover DPD tables (none after a table swap) and create fresh ones
             if (!getDPDTablesDrop().isEmpty()) {
-                p("tables exist");
+                logger.warn("DrugRef update: live DPD tables still present, dropping them");
                 insertLines(entityManager, getDPDTablesDrop());
             }
             insertLines(entityManager, getDPDTables());
@@ -750,56 +736,43 @@ public class DPDImport {
             }
             tx.commit();
 
-            try {
-                // Step 2: Download and parse active products from Health Canada
-                createDrugRecords(getZipStream(), entityManager);
-                // Step 3: Download and parse inactive product details
-                createDrugRecords(getInactiveZipStream(), entityManager);
-                // Step 4: Download and parse inactive products summary
-                createDrugRecords(getInactiveTableZipStream(), entityManager);
+            // Step 2: Parse active products
+            createDrugRecords(archives.getActive(), entityManager);
+            // Step 3: Parse inactive product details
+            createDrugRecords(archives.getInactiveDetail(), entityManager);
+            // Step 4: Parse inactive products summary
+            createDrugRecords(archives.getInactiveTable(), entityManager);
 
-                // Step 5: Load Holbrook drug-drug interaction data from bundled resource
-                p("populate interactions table with data");
-                String url="/interactions-holbrook.txt";
-                InputStream ins=this.getClass().getResourceAsStream(url);
-                if (ins==null) System.out.println("ins is null");
+            // Step 5: Load Holbrook drug-drug interaction data from bundled resource
+            logger.info("DrugRef update: loading bundled interaction data");
+            try (InputStream ins = this.getClass().getResourceAsStream("/interactions-holbrook.txt")) {
+                if (ins == null) {
+                    throw new IllegalStateException("bundled resource /interactions-holbrook.txt is missing from the WAR");
+                }
                 RecordParser.getDPDObject("interactions-holbrook.txt", ins, entityManager);
-            } catch (Exception e) {
-                e.printStackTrace();
-            }
-            try{
-                tx.begin();
-            }
-            catch(java.lang.IllegalStateException ee){
-                ee.printStackTrace();
-            }
-            catch(Exception e){
-                e.printStackTrace();
             }
 
-            // Step 6: Drop and recreate search index tables (cd_drug_search, link_generic_brand)
+            // Step 6: Create the search index tables (cd_drug_search, link_generic_brand)
+            tx.begin();
             if (!dropSearchTables().isEmpty()) {
                 insertLines(entityManager, dropSearchTables());
             }
             insertLines(entityManager, getCreateSearchTables());
             tx.commit();
 
-            // Step 7: Add database indexes to all DPD tables for query performance
-            tx.begin();
-            insertLines(entityManager, addIndexToTables());
-            tx.commit();
+            // Step 7: Add database indexes to all DPD tables for query performance.
+            // One transaction per statement: a failed index must not poison a shared one.
+            insertLinesTolerantly(entityManager, addIndexToTables());
 
             // Step 8: Build the search index from raw DPD data (brand names, generics, ATC, ingredients)
             ConfigureSearchData searchData = new ConfigureSearchData();
-            long beforeSD=System.currentTimeMillis();
-            System.out.println("=============time spent before importing search data="+(beforeSD-startTime));
+            logger.info("DrugRef update: raw data imported in " + (System.currentTimeMillis() - startTime)
+                    + " ms, building the search index");
             searchData.importSearchData(entityManager);
 
             // Step 9: Add indexes to the search table for search query performance
-            tx.begin();
-            insertLines(entityManager, addIndexToSearchTable());
-            tx.commit();
-  
+            insertLinesTolerantly(entityManager, addIndexToSearchTable());
+
         } finally {
 
             JpaUtils.close(entityManager);
