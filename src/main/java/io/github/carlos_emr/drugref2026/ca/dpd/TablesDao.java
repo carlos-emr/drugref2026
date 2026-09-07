@@ -1757,24 +1757,57 @@ public class TablesDao {
      * Checks a drug (identified by ATC code) against a patient's allergy list and returns
      * any matching allergy warnings.
      *
-     * <p>For each allergy in the patient's list, the check strategy depends on the allergy
-     * category type:</p>
+     * <p>Each allergy carries a category type that says which part of the drug reference the
+     * allergen name lives in, and the check for a category is: does the drug being prescribed
+     * share that part of the reference with the allergen?</p>
      * <ul>
-     *   <li><b>Type 8 (ATC):</b> Direct ATC code match against therapeutic class.</li>
-     *   <li><b>Type 10 (AHFS):</b> Looks up AHFS numbers for the allergy, then checks if the
-     *       drug's ATC code appears in any of those AHFS groups.</li>
-     *   <li><b>Type 11/12 (Generic):</b> Resolves the generic name through the link table to
-     *       find brand drug codes, then checks if those share a therapeutic class with the
-     *       target ATC.</li>
-     *   <li><b>Type 13 (Brand):</b> Resolves the brand name to drug codes and checks for
-     *       shared therapeutic class with the target ATC.</li>
-     *   <li><b>Type 14 (Ingredient):</b> Not yet implemented.</li>
+     *   <li><b>Type 8 (ATC class):</b> resolve the allergen name to its ATC code(s) and check
+     *       whether the drug's ATC code sits under any of them. ATC is a hierarchy encoded in the
+     *       code, and an allergen can name any level of it, so this is a prefix match.</li>
+     *   <li><b>Type 10 (AHFS class):</b> look up the AHFS numbers carrying that class name, then
+     *       check whether the drug's ATC code appears under any of them.</li>
+     *   <li><b>Type 11/12 (generic / compound):</b> resolve the generic name through the link
+     *       table to brand drug codes, then check for a shared therapeutic class.</li>
+     *   <li><b>Type 13 (brand):</b> resolve the brand name to drug codes and check for a shared
+     *       therapeutic class.</li>
+     *   <li><b>Type 14 (ingredient):</b> not yet implemented.</li>
+     *   <li><b>Type 0 (free text):</b> the allergen was typed by a clinician rather than picked
+     *       from the reference, so it carries no category at all. Its description is resolved
+     *       against the reference's own allergen names and then checked as whichever categories
+     *       it turns out to name. See below.</li>
      * </ul>
+     *
+     * <p><b>Why type 0 is checked and not skipped.</b> CARLOS writes typeCode 0 for every
+     * allergy added through its "Custom Allergy" button, and its demonstration dataset seeds
+     * PENICILLINS allergies that way. Falling through to the "no match yet" branch meant those
+     * allergies were silently never checked: prescribing amoxicillin to a patient recorded as
+     * allergic to PENICILLINS produced no warning at all, which is the dangerous direction for
+     * this function to fail in. Resolution is by EXACT name (the column collation makes that
+     * case-insensitive) against {@code cd_drug_search}, the same table the picker offers those
+     * names from — deliberately whole-name and not a fuzzy or substring match, because a false
+     * allergy alert on a prescription is its own harm and every near-miss spelling would produce
+     * one. (The hierarchy prefix matching inside categories 8 and 10 is a different thing: it
+     * walks the reference's own classification codes, not the typed text.)</p>
+     *
+     * <p><b>Data dependency.</b> Category 10 is the only check that reads AHFS, which Health
+     * Canada deprecated in July 2022 — {@link CdTherapeuticClass} notes {@code tcAhfsNumber} may
+     * be null in newer extracts. An allergen the reference knows ONLY as an AHFS class therefore
+     * stops resolving once an import carries no AHFS, and is reported in "missing" rather than
+     * warned on. That is the safe direction (it says "not checked", not "no allergy"), and
+     * category 8 covering the ATC hierarchy is what keeps class-level allergies working without
+     * AHFS; but an import that drops AHFS should be paired with a check that the class allergens
+     * clinicians actually record still resolve.</p>
      *
      * @param atcCode the ATC code of the drug being prescribed
      * @param allergies a Vector of Hashtables, each with keys "type", "description", "id"
-     * @return a Vector containing a single Hashtable with keys "warnings" (Vector of matching
-     *         allergy IDs) and "missing" (Vector of allergy IDs that could not be resolved)
+     * @return a Vector containing a single Hashtable with keys "warnings" (Vector of allergy IDs
+     *         the drug is contraindicated against) and "missing" (Vector of allergy IDs that were
+     *         NOT CHECKED, for any reason: the allergen name is one the reference does not carry,
+     *         the allergy arrived with no description, its only category has no implementation
+     *         here, or the prescription itself arrived with no usable ATC code). "missing" is
+     *         deliberately not "checked and clear" — an ID absent from both
+     *         lists is the only answer that means this drug was compared against that allergy and
+     *         did not match.
      */
     public Vector getAllergyWarnings(String atcCode, Vector allergies) {
 
@@ -1782,152 +1815,353 @@ public class TablesDao {
         Vector results = new Vector();
         Vector vec = new Vector();
         Hashtable ha = new Hashtable();
-        Vector warning = new Vector();
         Vector missing = new Vector();
+        // Allergies that were checked and did not match. They are reported by being in neither
+        // returned list, so nothing else records them, and a later failure would otherwise
+        // downgrade a real "checked and clear" answer to "never checked".
+        Vector cleared = new Vector();
 
-        if (atcCode.matches("") || atcCode.matches("null")) {
+        // Surrounding whitespace would survive into the category 8 prefix comparison and make
+        // every real code fail to match, so normalise once here and compare the trimmed value
+        // everywhere below.
+        String drugAtcCode = atcCode == null ? "" : atcCode.trim();
+        if (drugAtcCode.isEmpty() || "null".equalsIgnoreCase(drugAtcCode)) {
+            // No drug code means nothing was compared against anything. Returning both lists empty
+            // would claim every allergy was checked and none matched -- the silent all-clear this
+            // method exists to prevent -- so report every allergy as not checked instead.
+            logger.warn("getAllergyWarnings called with no usable atcCode; reporting every allergy as not checked");
+            markUncheckedAsMissing(allergies, results, missing, cleared);
             ha.put("warnings", results);
+            ha.put("missing", missing);
             vec.add(ha);
             return vec;
         }
-        EntityManager em = JpaUtils.createEntityManager();
-        //EntityTransaction tx = em.getTransaction();
-        //tx.begin();
+        // Creating the entity manager is itself a database operation and can fail. Inside the try
+        // that failure reports every allergy as not checked; outside it the exception escapes to
+        // the caller, which renders an error as "no warnings".
+        EntityManager em = null;
         try {
+            em = JpaUtils.createEntityManager();
             Enumeration e = allergies.elements();
             while (e.hasMoreElements()) {
                 Hashtable alleHash = new Hashtable((Hashtable) e.nextElement());
                 String aType = (String) alleHash.get("type");
                 String aDesc = (String) alleHash.get("description");
                 String aId = (String) alleHash.get("id");
-                if (aType.matches("8")) {
 
-                    Query query = em.createQuery("select tc.tcAtcNumber from CdTherapeuticClass tc where tc.tcAtcNumber= (:atcCode) and tc.tcAtc=(:aDesc)");
-                    query.setParameter("atcCode", atcCode);
-                    query.setParameter("aDesc", aDesc);
-                    List resultTcAtcNumber = query.getResultList();
-                    if (resultTcAtcNumber.size() > 0) {
-                        logger.debug(atcCode + " is in this1 Allergy group " + aDesc);
-                        results.add(aId);
+                if (aDesc == null || aDesc.trim().isEmpty()) {
+                    logger.debug("allergy id " + aId + " has no description; nothing to check");
+                    missing.add(aId);
+                    continue;
+                }
+                aDesc = aDesc.trim();
+
+                boolean warned = false;
+                boolean resolvedAny = false;
+                // Everything that touches the database for THIS allergy sits inside one handler,
+                // resolution included: a failure while resolving is as much this allergy's problem
+                // as a failure while matching, and letting it escape would abandon every allergy
+                // after it in the list.
+                try {
+                    // A free-text allergen names no category, so ask the reference which categories
+                    // carry that name and check the drug against each of them. A typed allergen is
+                    // checked as exactly the one category it declares.
+                    List<Integer> categories;
+                    if (isFreeTextAllergyType(aType)) {
+                        categories = resolveFreeTextAllergenCategories(em, aDesc);
+                        if (categories.isEmpty()) {
+                            logger.debug("free-text allergen '" + aDesc + "' is not a name this reference knows; not checked");
+                            missing.add(aId);
+                            continue;
+                        }
+                        logger.debug("free-text allergen '" + aDesc + "' resolved to categories " + categories);
                     } else {
-                        logger.debug(atcCode + " is NOT in this group " + aDesc);
-                    }
-                } else if (aType.matches("10")) {
-
-                    Query queryAHFSNumber = em.createQuery("select distinct tc.tcAhfsNumber from CdTherapeuticClass tc where tc.tcAhfs=(:aDesc)");
-                    queryAHFSNumber.setParameter("aDesc", aDesc);
-                    List<String> list = (List) queryAHFSNumber.getResultList();
-                    logger.debug("LIST SIZE " + list.size());
-                    for(String s: list){
-                        logger.debug("GET ALLERGY WARNIGN" + s + " atc code " + atcCode);
-                        /*
-                        select tc.tc_atc_number from cd_therapeutic_class tc where tc.tc_atc_number= 'J01CA08' and tc.tc_ahfs_number like ('08:12.16%');+---------------+
-
-                         */
-
-                        Query query = em.createQuery("select tc.tcAtcNumber from CdTherapeuticClass tc where tc.tcAtcNumber= (:atcCode) and tc.tcAhfsNumber like :aDesc");
-                        query.setParameter("atcCode", atcCode);
-                        query.setParameter("aDesc", s + "%");
-                        List resultTcAtcNumber = query.getResultList();
-                        if (resultTcAtcNumber.size() > 0) {
-                            logger.debug(atcCode + " is in this2 Allergy group " + aDesc);
-                            results.add(aId);
-                        } else {
-                            logger.debug(atcCode + " is NOT in this group " + aDesc);
+                        categories = new ArrayList<Integer>();
+                        try {
+                            categories.add(Integer.valueOf(aType.trim()));
+                        } catch (NumberFormatException nfe) {
+                            logger.debug("allergy id " + aId + " has unparseable type '" + aType + "'; not checked");
+                            missing.add(aId);
+                            continue;
                         }
                     }
-                } else if (aType.matches("14")) {
-                    logger.debug("aType=14 is not implemented yet");
-                } else if (aType.matches("11") || aType.matches("12")) {
-                    logger.debug("aType=11 or 12");
-                   /* Query query = em.createQuery("select tc.tcAtcNumber from CdDrugSearch cds, LinkGenericBrand lgb, CdTherapeuticClass tc where tc.tcAtcNumber =(:atcCode) and cds.name=(:aDesc) " +
-                            "and cds.drugCode=lgb.id and lgb.drugCode=tc.drugCode");
-                    query.setParameter("atcCode", atcCode);
-                    query.setParameter("aDesc", aDesc);
-                    List resultTcAtcNumber = query.getResultList();
-                    if (resultTcAtcNumber.size() > 0) {
-                        logger.debug("warning allergic to " + aDesc);
-                        results.add(aId);
-                    } else {
-                        logger.debug("NO warning for " + aDesc);
-                    }*/
-                    //ORIGINAL QUERY:select tc.tcAtcNumber from CdDrugSearch cds, LinkGenericBrand lgb, CdTherapeuticClass tc where tc.tcAtcNumber =(:atcCode) and cds.name=(:aDesc) and cds.drugCode=lgb.id and lgb.drugCode=tc.drugCode
-                    //for category 11 and 12 drugs,cds.id=cds.drugCode
-                    Query q1=em.createQuery("select distinct tc.tcAtcNumber from CdDrugSearch cds, CdTherapeuticClass tc,LinkGenericBrand lgb  where tc.tcAtcNumber =(:atcCode) and cds.name=(:aDesc) and cds.id=lgb.id and lgb.drugCode in (:tcDrugCodeString)");
-                    q1.setParameter("atcCode", atcCode);
-                    q1.setParameter("aDesc", aDesc);              
-                    
 
-                        Query q3=em.createQuery("select distinct tc.drugCode from  CdTherapeuticClass tc where tc.tcAtcNumber=(:atcCode)");
-                        q3.setParameter("atcCode", atcCode);
-                        List<Integer> r3=q3.getResultList();
-                        List<String> r3String=new ArrayList();
-                        for(Integer ii:r3)
-                            r3String.add(ii.toString());
-                        q1.setParameter("tcDrugCodeString", r3String);
-                        List<String> r1=q1.getResultList();
-                        logger.debug("r1 size: "+r1.size());
-                        for(String r1str:r1)
-                            logger.debug("r1="+r1str);
-                        if(r1.size()>0) {
-                            results.add(aId);
-                            logger.debug("warning allergic to " + aDesc);
+                    for (Integer category : categories) {
+                        if (category == null) {
+                            continue;
                         }
-                } else if (aType.matches("13")) {
-                   /* Query query = em.createQuery("select tc.tcAtcNumber from CdDrugSearch cds,CdTherapeuticClass tc where tc.tcAtcNumber =(:atcCode) and cds.name=(:aDesc) and cds.drugCode=tc.drugCode ");
-                    query.setParameter("atcCode", atcCode);
-                    query.setParameter("aDesc", aDesc);
-                    List resultTcAtcNumber = query.getResultList();
-                    if (resultTcAtcNumber.size() > 0) {
-                        logger.debug("warning allergic to " + aDesc);
-                        results.add(aId);
-                    } else {
-                        logger.debug("NO warning for " + aDesc);
-                    }*/
-
-                    //ORIGINAL QUERY:select tc.tcAtcNumber from CdDrugSearch cds,CdTherapeuticClass tc where tc.tcAtcNumber =(:atcCode) and cds.name=(:aDesc) and cds.drugCode=tc.drugCode
-                    Query q1=em.createQuery("select distinct tc.tcAtcNumber from CdDrugSearch cds,CdTherapeuticClass tc where tc.tcAtcNumber =(:atcCode) and cds.name=(:aDesc) and tc.drugCode in (:cdsDrugCodeInteger)");
-                   
-                    //Query q2=em.createQuery("select tc.drugCode from CdTherapeuticClass tc");
-                    Query q2=em.createQuery("select cds.drugCode from CdDrugSearch cds where cds.category=13 and cds.name=(:aDesc)");
-                    q2.setParameter("aDesc", aDesc);
-                    List<String> r2=q2.getResultList();
-                    List<Integer> r2Integer=new ArrayList();
-                    for(String ss:r2)
-                        r2Integer.add(Integer.parseInt(ss));
-                    
-                    if(r2Integer.isEmpty()) {
-                    	missing.add(aId);
-                    } else {
-	                    q1.setParameter("atcCode", atcCode);
-	                    q1.setParameter("aDesc", aDesc);
-	                    q1.setParameter("cdsDrugCodeInteger", r2Integer);
-	                    
-	                    logger.info("atcCode="+atcCode + ",aDesc=" + aDesc + ",cdsDrugCodeInteger=" + r2Integer);
-	                    List<String> r1=q1.getResultList();
-	                    if(r1.size()>0)
-	                        results.add(aId);
+                        Boolean match = matchesAllergyCategory(em, drugAtcCode, category.intValue(), aDesc);
+                        if (match == null) {
+                            // The allergen name does not exist in that part of the reference, so this
+                            // category checked nothing. Only report "missing" if no category could.
+                            continue;
+                        }
+                        resolvedAny = true;
+                        if (match.booleanValue()) {
+                            warned = true;
+                            break;
+                        }
                     }
-
-                } else {
-                    logger.debug("No Match YET desc " + aDesc + " type " + aType + " atccode " + atcCode);
+                } catch (Exception perAllergy) {
+                    // One allergy's lookup failing must not decide the others. Before this was
+                    // scoped per allergy, a single failure broke the loop and every allergy after
+                    // it came back in neither list -- reported as checked and clear without ever
+                    // being looked at.
+                    logger.error("allergy check failed for allergy id " + aId + " against atcCode=" + drugAtcCode, perAllergy);
+                    missing.add(aId);
+                    continue;
                 }
 
+                if (warned) {
+                    logger.debug(drugAtcCode + " is in allergy group " + aDesc);
+                    results.add(aId);
+                } else if (!resolvedAny) {
+                    missing.add(aId);
+                } else {
+                    // Checked against the reference and not a match. That verdict is carried by
+                    // absence from both lists, so it has to be remembered separately or a later
+                    // failure would relabel it as never checked.
+                    logger.debug(drugAtcCode + " is NOT in allergy group " + aDesc);
+                    cleared.add(aId);
+                }
             }
         } catch (Exception e) {
-            e.printStackTrace();
+            // Anything that escapes the per-allergy handler above (opening the entity manager,
+            // iterating the input) leaves allergies genuinely unchecked. Report every one that did
+            // not reach a verdict as "missing": an empty response here is indistinguishable from a
+            // completed check that found nothing, which is the failure this method exists to avoid.
+            logger.error("getAllergyWarnings failed for atcCode=" + drugAtcCode, e);
+            markUncheckedAsMissing(allergies, results, missing, cleared);
         } finally {
-            JpaUtils.close(em);
+            if (em != null) {
+                JpaUtils.close(em);
+            }
         }
 
         ha.put("warnings", results);
         ha.put("missing", missing);
         vec.add(ha);
-        // logger.debug("print out return values: ");
-        // Vector retlist=(Vector)((Hashtable)vec.get(0)).get("warnings");
-        //  for(int i=0;i<retlist.size();i++)
-        //      logger.debug("id="+retlist.get(i));
         return vec;
+    }
+
+    /**
+     * Adds every allergy id that reached no verdict to {@code missing}, so an aborted run reports
+     * "not checked" for them instead of leaving them out of both lists.
+     *
+     * @param allergies the caller's allergy list, each entry a Hashtable carrying an "id"
+     * @param results the ids already warned on
+     * @param missing the ids already known to be unchecked; extended in place
+     * @param cleared the ids that were checked and did not match, which must not be relabelled
+     */
+    private void markUncheckedAsMissing(Vector allergies, Vector results, Vector missing, Vector cleared) {
+        if (allergies == null) {
+            return;
+        }
+        Enumeration remaining = allergies.elements();
+        while (remaining.hasMoreElements()) {
+            Object element = remaining.nextElement();
+            if (!(element instanceof Hashtable)) {
+                continue;
+            }
+            Object aId = ((Hashtable) element).get("id");
+            if (aId != null && !results.contains(aId) && !missing.contains(aId) && !cleared.contains(aId)) {
+                missing.add(aId);
+            }
+        }
+    }
+
+    /**
+     * Returns true when an allergy's category type means "no category" — the allergen was typed
+     * as free text rather than picked out of the drug reference. CARLOS sends "0" for those; a
+     * null, blank or non-numeric type is treated the same way rather than being dropped.
+     *
+     * @param aType the allergy's category type as sent by the caller
+     * @return true when the description has to be resolved against the reference before it can
+     *         be checked
+     */
+    private boolean isFreeTextAllergyType(String aType) {
+        if (aType == null || aType.trim().isEmpty()) {
+            return true;
+        }
+        String t = aType.trim();
+        if ("0".equals(t) || "null".equals(t)) {
+            return true;
+        }
+        // Anything that is not a category number names no category either. Falling through to
+        // Integer.valueOf() here would report the allergy as unresolvable without ever trying its
+        // description, which is the silent-skip this method exists to prevent.
+        try {
+            Integer.valueOf(t);
+            return false;
+        } catch (NumberFormatException nfe) {
+            return true;
+        }
+    }
+
+    /**
+     * Resolves a free-text allergen description to the drug-reference categories that carry a
+     * name exactly equal to it.
+     *
+     * <p>Whole-name match only. This feeds a prescription-time safety alert, where a wrong match
+     * is a false alarm the prescriber learns to dismiss — so a name is either one the reference
+     * knows or it is reported as unresolved. Case is folded in the query rather than left to the
+     * column collation: DrugRef also runs on PostgreSQL (see
+     * {@code DrugrefProperties.isPostgres()}), where JPQL {@code =} is case-sensitive and a
+     * clinician's "Penicillins" would not match the reference's "PENICILLINS".</p>
+     *
+     * @param em the entity manager to query with
+     * @param aDesc the trimmed free-text allergen description
+     * @return the distinct categories naming that allergen; empty when the reference does not
+     *         know the name
+     */
+    @SuppressWarnings("unchecked")
+    private List<Integer> resolveFreeTextAllergenCategories(EntityManager em, String aDesc) {
+        Query q = em.createQuery(
+                "select distinct cds.category from CdDrugSearch cds "
+                        + "where cds.category is not null and lower(cds.name) = lower(:aDesc)");
+        q.setParameter("aDesc", aDesc);
+        List<Integer> categories = q.getResultList();
+        return categories == null ? new ArrayList<Integer>() : categories;
+    }
+
+    /**
+     * Checks the drug being prescribed against one allergen category.
+     *
+     * @param em the entity manager to query with
+     * @param atcCode the ATC code of the drug being prescribed
+     * @param category the allergen category to check as (8, 10, 11, 12, 13 or 14)
+     * @param aDesc the allergen name
+     * @return TRUE when the drug falls in the allergen's group, FALSE when it demonstrably does
+     *         not, and null when this category could not resolve the name at all (an unsupported
+     *         category, or a name that exists nowhere in that part of the reference) — the caller
+     *         reports that as "missing" rather than as "checked and clear"
+     */
+    @SuppressWarnings("unchecked")
+    private Boolean matchesAllergyCategory(EntityManager em, String atcCode, int category, String aDesc) {
+        if (category == 8) {
+            // ATC is a hierarchy encoded in the code itself, and an allergen name can sit at any
+            // level of it: J01CF is "BETA-LACTAMASE RESISTANT PENICILLINS" and J01CF02 is the
+            // cloxacillin under it, each its own row. Comparing the prescribed drug's own
+            // description would only ever match a leaf, so an allergy to the class name never
+            // warned on any drug in that class. Resolve the name to its ATC code(s) and prefix
+            // match, exactly as category 10 does with AHFS numbers.
+            Query atcNumbers = em.createQuery(
+                    "select distinct tc.tcAtcNumber from CdTherapeuticClass tc where lower(tc.tcAtc) = lower(:aDesc)");
+            atcNumbers.setParameter("aDesc", aDesc);
+            List<String> allergenAtcNumbers = atcNumbers.getResultList();
+            if (allergenAtcNumbers == null || allergenAtcNumbers.isEmpty()) {
+                return null;
+            }
+            // A blank code would prefix EVERY drug: String.startsWith("") is always true, so one
+            // such row would warn on every prescription this reference is ever asked about. Skip
+            // them, and if that leaves nothing usable say so rather than answering "clear".
+            boolean checkedAgainstAnyCode = false;
+            for (String allergenAtc : allergenAtcNumbers) {
+                if (allergenAtc == null || allergenAtc.trim().isEmpty()) {
+                    continue;
+                }
+                checkedAgainstAnyCode = true;
+                if (atcCode.startsWith(allergenAtc.trim())) {
+                    return Boolean.TRUE;
+                }
+            }
+            return checkedAgainstAnyCode ? Boolean.FALSE : null;
+        }
+
+        if (category == 10) {
+            // AHFS was deprecated in July 2022, so an extract can carry the class DESCRIPTION with
+            // no number beside it. Excluding those in the query is what keeps such an allergen
+            // reported as unchecked: concatenating a null number gave the literal prefix "null%",
+            // which matches nothing and would have answered "checked and clear".
+            Query queryAhfsNumber = em.createQuery(
+                    "select distinct tc.tcAhfsNumber from CdTherapeuticClass tc "
+                            + "where lower(tc.tcAhfs) = lower(:aDesc) "
+                            + "and tc.tcAhfsNumber is not null and trim(tc.tcAhfsNumber) <> ''");
+            queryAhfsNumber.setParameter("aDesc", aDesc);
+            List<String> ahfsNumbers = queryAhfsNumber.getResultList();
+            if (ahfsNumbers == null || ahfsNumbers.isEmpty()) {
+                return null;
+            }
+            for (String ahfsNumber : ahfsNumbers) {
+                // The AHFS number is a hierarchy: 08:12.16 (penicillins) is the parent of
+                // 08:12.16.08 (aminopenicillins), which is where amoxicillin actually sits.
+                // Prefix-matching the number is what makes a class-level allergy cover the
+                // drugs filed under its subclasses.
+                Query query = em.createQuery(
+                        "select tc.tcAtcNumber from CdTherapeuticClass tc where tc.tcAtcNumber = (:atcCode) and tc.tcAhfsNumber like :ahfsPrefix");
+                query.setParameter("atcCode", atcCode);
+                query.setParameter("ahfsPrefix", ahfsNumber + "%");
+                if (!query.getResultList().isEmpty()) {
+                    return Boolean.TRUE;
+                }
+            }
+            return Boolean.FALSE;
+        }
+
+        if (category == 11 || category == 12) {
+            // For categories 11 and 12 the search-table id doubles as the generic-brand link id.
+            Query drugCodesForAtc = em.createQuery(
+                    "select distinct tc.drugCode from CdTherapeuticClass tc where tc.tcAtcNumber = (:atcCode)");
+            drugCodesForAtc.setParameter("atcCode", atcCode);
+            List<Integer> drugCodes = drugCodesForAtc.getResultList();
+            if (drugCodes == null || drugCodes.isEmpty()) {
+                return null;
+            }
+            List<String> drugCodeStrings = new ArrayList<String>();
+            for (Integer drugCode : drugCodes) {
+                drugCodeStrings.add(drugCode.toString());
+            }
+            Query query = em.createQuery(
+                    "select distinct tc.tcAtcNumber from CdDrugSearch cds, CdTherapeuticClass tc, LinkGenericBrand lgb "
+                            + "where tc.tcAtcNumber = (:atcCode) and lower(cds.name) = lower(:aDesc) and cds.id = lgb.id and lgb.drugCode in (:drugCodes)");
+            query.setParameter("atcCode", atcCode);
+            query.setParameter("aDesc", aDesc);
+            query.setParameter("drugCodes", drugCodeStrings);
+            if (!query.getResultList().isEmpty()) {
+                return Boolean.TRUE;
+            }
+            // An empty result here means either "this drug is not that generic" or "the reference
+            // has never heard of this generic". Only the first is a checked-and-clear answer.
+            Query known = em.createQuery(
+                    "select count(cds) from CdDrugSearch cds where cds.category in (11, 12) and lower(cds.name) = lower(:aDesc)");
+            known.setParameter("aDesc", aDesc);
+            return ((Number) known.getSingleResult()).longValue() > 0 ? Boolean.FALSE : null;
+        }
+
+        if (category == 13) {
+            Query brandDrugCodes = em.createQuery(
+                    "select cds.drugCode from CdDrugSearch cds where cds.category = 13 and lower(cds.name) = lower(:aDesc)");
+            brandDrugCodes.setParameter("aDesc", aDesc);
+            List<String> codes = brandDrugCodes.getResultList();
+            if (codes == null || codes.isEmpty()) {
+                return null;
+            }
+            List<Integer> codeInts = new ArrayList<Integer>();
+            for (String code : codes) {
+                try {
+                    codeInts.add(Integer.valueOf(code));
+                } catch (NumberFormatException nfe) {
+                    logger.debug("skipping non-numeric brand drug code '" + code + "' for " + aDesc);
+                }
+            }
+            if (codeInts.isEmpty()) {
+                return null;
+            }
+            // The brand's drug codes are already resolved above, so the name is fully spent:
+            // keeping CdDrugSearch in this query only cross-joins every row sharing that name
+            // back over the result for no added predicate.
+            Query query = em.createQuery(
+                    "select distinct tc.tcAtcNumber from CdTherapeuticClass tc "
+                            + "where tc.tcAtcNumber = (:atcCode) and tc.drugCode in (:codes)");
+            query.setParameter("atcCode", atcCode);
+            query.setParameter("codes", codeInts);
+            return query.getResultList().isEmpty() ? Boolean.FALSE : Boolean.TRUE;
+        }
+
+        // Category 14 (active ingredient) and the AI-derived generic categories 18/19 have no
+        // implementation here; report them as unresolved rather than as "checked and clear".
+        logger.debug("allergen category " + category + " is not implemented; '" + aDesc + "' not checked");
+        return null;
     }
 
     /**
