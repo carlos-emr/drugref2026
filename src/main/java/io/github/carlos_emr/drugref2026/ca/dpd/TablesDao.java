@@ -1608,29 +1608,29 @@ public class TablesDao {
      * @param pKey the Drug Identification Number (DIN) to check
      * @return a Vector of Date objects representing discontinuation dates, empty if active
      */
-    public Vector getInactiveDate(String pKey) {
-        logger.debug("in getInactiveDate");
+    public Vector<java.util.Date> getInactiveDate(String din) {
         EntityManager em = JpaUtils.createEntityManager();
-        Vector vec = new Vector();
-        //EntityTransaction tx = em.getTransaction();
-        //tx.begin();
-        //Query queryOne = em.createQuery("select cds from CdInactiveProducts cds where cds.drugIdentificationNumber = (:din)");
         try {
-            Query queryOne = em.createNamedQuery("CdInactiveProducts.findByDrugIdentificationNumber");
-            queryOne.setParameter("drugIdentificationNumber", pKey);
-
-            List<CdInactiveProducts> inactiveCodes = queryOne.getResultList();
-            if (inactiveCodes != null) {
-                for (CdInactiveProducts inp : inactiveCodes) {
-                    vec.add(inp.getHistoryDate());
-                }
-            }
-        } catch (Exception e) {
-            e.printStackTrace();
+            return findInactiveDates(em, din);
         } finally {
             JpaUtils.close(em);
         }
-        return vec;
+    }
+
+    // Let lookup failures propagate to XML-RPC as faults: an empty vector means
+    // a successful lookup found no inactive product, never a database failure.
+    static Vector<java.util.Date> findInactiveDates(EntityManager em, String din) {
+        List<CdInactiveProducts> products = em.createNamedQuery(
+                "CdInactiveProducts.findByDrugIdentificationNumber", CdInactiveProducts.class)
+                .setParameter("drugIdentificationNumber", din).getResultList();
+        Vector<java.util.Date> dates = new Vector<>();
+        for (CdInactiveProducts product : products) {
+            if (product.getHistoryDate() == null) {
+                throw new IllegalStateException("Inactive product has no history date");
+            }
+            dates.add(product.getHistoryDate());
+        }
+        return dates;
     }
 
     /**
