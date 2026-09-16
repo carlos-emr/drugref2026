@@ -33,6 +33,7 @@ class InactiveDateTest {
     @BeforeEach void open() {
         factory = new HibernatePersistenceConfiguration("inactive-date-test")
                 .managedClass(CdInactiveProducts.class)
+                .managedClass(CdDrugSearch.class)
                 .jdbcUrl("jdbc:h2:mem:inactive_dates;DB_CLOSE_DELAY=-1")
                 .jdbcCredentials("sa", "")
                 .property("hibernate.hbm2ddl.auto", "create-drop")
@@ -78,4 +79,46 @@ class InactiveDateTest {
         assertThatThrownBy(() -> TablesDao.findInactiveDates(em, "02245547"))
                 .isInstanceOf(IllegalStateException.class);
     }
+    private TablesDao searchDao() {
+        return new TablesDao() {
+            @Override public java.util.List<Integer> getInactiveDrugs() { return java.util.List.of(-1); }
+            @Override public String getFirstDinInAIGroup(String group) { return "02245547"; }
+            @Override public java.util.Vector getInactiveDate(String din) { return TablesDao.findInactiveDates(em, din); }
+        };
+    }
+
+    private void seedSearch() {
+        em.getTransaction().begin();
+        for (int category : new int[] {13, 18, 19}) {
+            CdDrugSearch row = new CdDrugSearch();
+            row.setName("TEST " + category);
+            row.setCategory(category);
+            row.setDrugCode("123");
+            em.persist(row);
+        }
+        em.getTransaction().commit();
+        em.clear();
+    }
+
+    @Test void completeSearchPreservesEveryResult() {
+        seedSearch();
+        seed(java.sql.Date.valueOf("2018-07-24"));
+        assertThat(searchDao().listSearchElement4("TEST", true, em)).hasSize(3);
+    }
+
+    @Test void inactiveLookupFailureCannotReturnPartialSearch() {
+        seedSearch();
+        seed(null);
+        assertThatThrownBy(() -> searchDao().listSearchElement4("TEST", true, em))
+                .isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test void failedSearchQueryCannotReturnNoMatches() {
+        TablesDao dao = searchDao();
+        em.close();
+        assertThatThrownBy(() -> dao.listSearchElement4("TEST", true, em))
+                .isInstanceOf(IllegalStateException.class);
+        em = null;
+    }
+
 }

@@ -846,7 +846,15 @@ public class TablesDao {
      *                  anywhere in the name (left and right wildcards)
      * @return a Vector of Hashtable results with keys "name", "category", "id", "isInactive"
      */
-    public Vector listSearchElement4(String str, boolean rightOnly){
+    public Vector listSearchElement4(String str, boolean rightOnly) {
+        try (EntityManager em = JpaUtils.createEntityManager()) {
+            return listSearchElement4(str, rightOnly, em);
+        }
+    }
+
+    // Caller owns the session; every failure must propagate instead of returning
+    // an empty or partially populated drug search as a successful result.
+    Vector listSearchElement4(String str, boolean rightOnly, EntityManager em) {
         //logger.debug("before create em in listSearchElement4");
         // Normalize the search input: uppercase, strip commas and apostrophes, trim
         // (leading whitespace would defeat the Phase-1 prefix match in rightOnly mode)
@@ -862,19 +870,16 @@ public class TablesDao {
         if(inactiveDrugs.size()==0)
             inactiveDrugs=getInactiveDrugs();
         //logger.debug("inactiveDrugs size ="+inactiveDrugs.size());
-        EntityManager em = JpaUtils.createEntityManager();
         //logger.debug("created entity manager");
         // Phase 1 query: direct prefix/substring match on brand and new generic names,
         // excluding manufacturer-tagged generics (APO-, NOVO-, MYLAN- prefixes)
         String q1="select cds from CdDrugSearch cds where upper(cds.name) like '"+ ((rightOnly)?"":"%") +""+matchKey+"%' and cds.name NOT IN (select cc.name from CdDrugSearch cc where upper(cc.name) like 'APO-%' or upper(cc.name) like 'NOVO-%' or upper(cc.name) like 'MYLAN-%' ) and (cds.category=13 or cds.category=18 or cds.category=19)  order by cds.name";
        //logger.debug("q1 ="+q1);
         String q2="select cdss.name from CdDrugSearch cdss where upper(cdss.name) like '"+((rightOnly)?"":"%")+""+matchKey+"%'";
-        try{
+        {
             Query query=em.createQuery(q1);
             query.setMaxResults(MAX_NO_ROWS);
             results1=query.getResultList();
-        }catch(Exception e){
-            e.printStackTrace();
         }
         // If Phase 1 already fills the max rows, skip Phase 2 entirely
         if(results1.size()>=MAX_NO_ROWS){
@@ -939,14 +944,12 @@ public class TablesDao {
                     queryStr = queryStr + ") and cds.name NOT IN (select cc.name from CdDrugSearch cc where upper(cc.name) like 'APO-%' or upper(cc.name) like 'NOVO-%' or upper(cc.name) like 'MYLAN-%' ) "
                             + "and (cds.category=13 or cds.category=18 or cds.category=19) and cds.name NOT IN ("+q2+") order by cds.name";//q2 prevents duplication of result.
                     //logger.debug(queryStr);
-                    try {                        
+                    {
                         Query query = em.createQuery(queryStr);
                         //logger.debug("before query");
                         query.setMaxResults(max_rows_for_result2);
                         results2 = query.getResultList();
                         //logger.debug("after query");
-                    } catch (Exception e) {
-                        e.printStackTrace();
                     }
 
                     
@@ -956,7 +959,7 @@ public class TablesDao {
             
 
             Vector vec = new Vector();
-        try{
+        {
                for (CdDrugSearch result : results1) {
 
                         boolean isInactive=false;
@@ -1047,10 +1050,6 @@ public class TablesDao {
 	                	
 	                });
 				}
-            }catch(Exception e){
-                e.printStackTrace();
-            }finally{
-                JpaUtils.close(em);
             }
             return (vec);
         } else {
