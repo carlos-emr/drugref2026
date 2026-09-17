@@ -404,25 +404,18 @@ public class TablesDao {
      * is cached in {@link #inactiveDrugs} and used during search to flag inactive results.</p>
      *
      * @return a list of drug code integers for inactive products
+     * @throws jakarta.persistence.PersistenceException if the lookup fails; no empty fallback is cached
      */
-    public List<Integer> getInactiveDrugs(){
-        List<Integer> retLs=new ArrayList();
-        EntityManager em=JpaUtils.createEntityManager();
-        try{
-            String sql="select cip from CdInactiveProducts cip";
-            Query q=em.createQuery(sql);
-            List<CdInactiveProducts> list=q.getResultList();
-            if(list!=null && list.size()>0){
-                for(CdInactiveProducts cip:list){
-                    retLs.add(cip.getDrugCode());
-                }
-            }
-        }catch(Exception e){
-            e.printStackTrace();
-        }finally{
-            JpaUtils.close(em);
+    public List<Integer> getInactiveDrugs() {
+        try (EntityManager em = JpaUtils.createEntityManager()) {
+            return findInactiveDrugCodes(em);
         }
-        return retLs;
+    }
+
+    // Caller owns the session. A failed lookup must never become an empty cache.
+    static List<Integer> findInactiveDrugCodes(EntityManager em) {
+        return em.createQuery("select cip.drugCode from CdInactiveProducts cip", Integer.class)
+                .getResultList();
     }
 
     /**
@@ -798,26 +791,20 @@ public class TablesDao {
      *
      * @param aiGroupNo the AI group number to look up
      * @return the DIN string of the first product in the group, or null if none found
+     * @throws jakarta.persistence.PersistenceException if the lookup fails
      */
     public String getFirstDinInAIGroup(String aiGroupNo) {
-    	String q1="select cdp from CdDrugProduct cdp where cdp.aiGroupNo = (:groupNo) order by cdp.lastUpdateDate";
-    	// This helper runs once per candidate row inside the search expansion,
-    	// so the missing close here alone consumed most of the connection pool
-    	// on a single list_search_element3 call.
-    	EntityManager em = JpaUtils.createEntityManager();
-         try{
-             Query query=em.createQuery(q1);
-             query.setParameter("groupNo", aiGroupNo);
-             List rs = query.getResultList();
-             if(rs.size()>0) {
-            	 return ((CdDrugProduct)rs.get(0)).getDrugIdentificationNumber();
-             }
-         }catch(Exception e){
-             e.printStackTrace();
-         }finally{
-             JpaUtils.close(em);
-         }
-         return null;
+        try (EntityManager em = JpaUtils.createEntityManager()) {
+            return findFirstDinInAiGroup(em, aiGroupNo);
+        }
+    }
+
+    // Caller owns the session; null means a successful query found no product.
+    static String findFirstDinInAiGroup(EntityManager em, String aiGroupNo) {
+        List<CdDrugProduct> products = em.createQuery(
+                "select cdp from CdDrugProduct cdp where cdp.aiGroupNo = :groupNo order by cdp.lastUpdateDate",
+                CdDrugProduct.class).setParameter("groupNo", aiGroupNo).setMaxResults(1).getResultList();
+        return products.isEmpty() ? null : products.get(0).getDrugIdentificationNumber();
     }
 
     /**
@@ -997,7 +984,7 @@ public class TablesDao {
                             if(inactiveDrugs.contains(Integer.parseInt(drugCode)))
                                     isInactive=true;
                         }
-                        if(result.getCategory().intValue() == 18) {
+                        if(result.getCategory().intValue() == 18 || result.getCategory().intValue() == 19) {
                         	if(drugCode.indexOf("+")!=-1) {
                         		drugCode = drugCode.substring(0,drugCode.indexOf("+"));
                         	}
