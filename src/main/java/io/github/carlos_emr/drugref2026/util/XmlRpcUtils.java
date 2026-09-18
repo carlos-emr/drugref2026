@@ -17,6 +17,7 @@
 package io.github.carlos_emr.drugref2026.util;
 
 import java.io.StringReader;
+import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
@@ -79,7 +80,12 @@ public final class XmlRpcUtils {
         } else if (value instanceof Double d) {
             sb.append("<double>").append(d).append("</double>");
         } else if (value instanceof Date date) {
-            LocalDateTime ldt = LocalDateTime.ofInstant(date.toInstant(), ZoneId.systemDefault());
+            // SQL DATE represents a calendar date and deliberately rejects toInstant().
+            // Preserve that date at midnight; other Date implementations retain
+            // the existing local-time XML-RPC representation (second precision).
+            LocalDateTime ldt = date instanceof java.sql.Date sqlDate
+                    ? sqlDate.toLocalDate().atStartOfDay()
+                    : LocalDateTime.ofInstant(Instant.ofEpochMilli(date.getTime()), ZoneId.systemDefault());
             sb.append("<dateTime.iso8601>").append(DATETIME_FORMATTERS[0].format(ldt)).append("</dateTime.iso8601>");
         } else if (value instanceof byte[] bytes) {
             sb.append("<base64>").append(Base64.getEncoder().encodeToString(bytes)).append("</base64>");

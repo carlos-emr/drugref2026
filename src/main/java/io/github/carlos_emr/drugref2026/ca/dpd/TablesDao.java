@@ -404,25 +404,18 @@ public class TablesDao {
      * is cached in {@link #inactiveDrugs} and used during search to flag inactive results.</p>
      *
      * @return a list of drug code integers for inactive products
+     * @throws jakarta.persistence.PersistenceException if the lookup fails; no empty fallback is cached
      */
-    public List<Integer> getInactiveDrugs(){
-        List<Integer> retLs=new ArrayList();
-        EntityManager em=JpaUtils.createEntityManager();
-        try{
-            String sql="select cip from CdInactiveProducts cip";
-            Query q=em.createQuery(sql);
-            List<CdInactiveProducts> list=q.getResultList();
-            if(list!=null && list.size()>0){
-                for(CdInactiveProducts cip:list){
-                    retLs.add(cip.getDrugCode());
-                }
-            }
-        }catch(Exception e){
-            e.printStackTrace();
-        }finally{
-            JpaUtils.close(em);
+    public List<Integer> getInactiveDrugs() {
+        try (EntityManager em = JpaUtils.createEntityManager()) {
+            return findInactiveDrugCodes(em);
         }
-        return retLs;
+    }
+
+    // Caller owns the session. A failed lookup must never become an empty cache.
+    static List<Integer> findInactiveDrugCodes(EntityManager em) {
+        return em.createQuery("select cip.drugCode from CdInactiveProducts cip", Integer.class)
+                .getResultList();
     }
 
     /**
@@ -798,26 +791,20 @@ public class TablesDao {
      *
      * @param aiGroupNo the AI group number to look up
      * @return the DIN string of the first product in the group, or null if none found
+     * @throws jakarta.persistence.PersistenceException if the lookup fails
      */
     public String getFirstDinInAIGroup(String aiGroupNo) {
-    	String q1="select cdp from CdDrugProduct cdp where cdp.aiGroupNo = (:groupNo) order by cdp.lastUpdateDate";
-    	// This helper runs once per candidate row inside the search expansion,
-    	// so the missing close here alone consumed most of the connection pool
-    	// on a single list_search_element3 call.
-    	EntityManager em = JpaUtils.createEntityManager();
-         try{
-             Query query=em.createQuery(q1);
-             query.setParameter("groupNo", aiGroupNo);
-             List rs = query.getResultList();
-             if(rs.size()>0) {
-            	 return ((CdDrugProduct)rs.get(0)).getDrugIdentificationNumber();
-             }
-         }catch(Exception e){
-             e.printStackTrace();
-         }finally{
-             JpaUtils.close(em);
-         }
-         return null;
+        try (EntityManager em = JpaUtils.createEntityManager()) {
+            return findFirstDinInAiGroup(em, aiGroupNo);
+        }
+    }
+
+    // Caller owns the session; null means a successful query found no product.
+    static String findFirstDinInAiGroup(EntityManager em, String aiGroupNo) {
+        List<CdDrugProduct> products = em.createQuery(
+                "select cdp from CdDrugProduct cdp where cdp.aiGroupNo = :groupNo order by cdp.lastUpdateDate",
+                CdDrugProduct.class).setParameter("groupNo", aiGroupNo).setMaxResults(1).getResultList();
+        return products.isEmpty() ? null : products.get(0).getDrugIdentificationNumber();
     }
 
     /**
@@ -846,7 +833,15 @@ public class TablesDao {
      *                  anywhere in the name (left and right wildcards)
      * @return a Vector of Hashtable results with keys "name", "category", "id", "isInactive"
      */
-    public Vector listSearchElement4(String str, boolean rightOnly){
+    public Vector listSearchElement4(String str, boolean rightOnly) {
+        try (EntityManager em = JpaUtils.createEntityManager()) {
+            return listSearchElement4(str, rightOnly, em);
+        }
+    }
+
+    // Caller owns the session; every failure must propagate instead of returning
+    // an empty or partially populated drug search as a successful result.
+    Vector listSearchElement4(String str, boolean rightOnly, EntityManager em) {
         //logger.debug("before create em in listSearchElement4");
         // Normalize the search input: uppercase, strip commas and apostrophes, trim
         // (leading whitespace would defeat the Phase-1 prefix match in rightOnly mode)
@@ -862,19 +857,16 @@ public class TablesDao {
         if(inactiveDrugs.size()==0)
             inactiveDrugs=getInactiveDrugs();
         //logger.debug("inactiveDrugs size ="+inactiveDrugs.size());
-        EntityManager em = JpaUtils.createEntityManager();
         //logger.debug("created entity manager");
         // Phase 1 query: direct prefix/substring match on brand and new generic names,
         // excluding manufacturer-tagged generics (APO-, NOVO-, MYLAN- prefixes)
         String q1="select cds from CdDrugSearch cds where upper(cds.name) like '"+ ((rightOnly)?"":"%") +""+matchKey+"%' and cds.name NOT IN (select cc.name from CdDrugSearch cc where upper(cc.name) like 'APO-%' or upper(cc.name) like 'NOVO-%' or upper(cc.name) like 'MYLAN-%' ) and (cds.category=13 or cds.category=18 or cds.category=19)  order by cds.name";
        //logger.debug("q1 ="+q1);
         String q2="select cdss.name from CdDrugSearch cdss where upper(cdss.name) like '"+((rightOnly)?"":"%")+""+matchKey+"%'";
-        try{
+        {
             Query query=em.createQuery(q1);
             query.setMaxResults(MAX_NO_ROWS);
             results1=query.getResultList();
-        }catch(Exception e){
-            e.printStackTrace();
         }
         // If Phase 1 already fills the max rows, skip Phase 2 entirely
         if(results1.size()>=MAX_NO_ROWS){
@@ -939,14 +931,12 @@ public class TablesDao {
                     queryStr = queryStr + ") and cds.name NOT IN (select cc.name from CdDrugSearch cc where upper(cc.name) like 'APO-%' or upper(cc.name) like 'NOVO-%' or upper(cc.name) like 'MYLAN-%' ) "
                             + "and (cds.category=13 or cds.category=18 or cds.category=19) and cds.name NOT IN ("+q2+") order by cds.name";//q2 prevents duplication of result.
                     //logger.debug(queryStr);
-                    try {                        
+                    {
                         Query query = em.createQuery(queryStr);
                         //logger.debug("before query");
                         query.setMaxResults(max_rows_for_result2);
                         results2 = query.getResultList();
                         //logger.debug("after query");
-                    } catch (Exception e) {
-                        e.printStackTrace();
                     }
 
                     
@@ -956,7 +946,7 @@ public class TablesDao {
             
 
             Vector vec = new Vector();
-        try{
+        {
                for (CdDrugSearch result : results1) {
 
                         boolean isInactive=false;
@@ -994,7 +984,7 @@ public class TablesDao {
                             if(inactiveDrugs.contains(Integer.parseInt(drugCode)))
                                     isInactive=true;
                         }
-                        if(result.getCategory().intValue() == 18) {
+                        if(result.getCategory().intValue() == 18 || result.getCategory().intValue() == 19) {
                         	if(drugCode.indexOf("+")!=-1) {
                         		drugCode = drugCode.substring(0,drugCode.indexOf("+"));
                         	}
@@ -1047,10 +1037,6 @@ public class TablesDao {
 	                	
 	                });
 				}
-            }catch(Exception e){
-                e.printStackTrace();
-            }finally{
-                JpaUtils.close(em);
             }
             return (vec);
         } else {
@@ -1608,29 +1594,29 @@ public class TablesDao {
      * @param pKey the Drug Identification Number (DIN) to check
      * @return a Vector of Date objects representing discontinuation dates, empty if active
      */
-    public Vector getInactiveDate(String pKey) {
-        logger.debug("in getInactiveDate");
+    public Vector<java.util.Date> getInactiveDate(String din) {
         EntityManager em = JpaUtils.createEntityManager();
-        Vector vec = new Vector();
-        //EntityTransaction tx = em.getTransaction();
-        //tx.begin();
-        //Query queryOne = em.createQuery("select cds from CdInactiveProducts cds where cds.drugIdentificationNumber = (:din)");
         try {
-            Query queryOne = em.createNamedQuery("CdInactiveProducts.findByDrugIdentificationNumber");
-            queryOne.setParameter("drugIdentificationNumber", pKey);
-
-            List<CdInactiveProducts> inactiveCodes = queryOne.getResultList();
-            if (inactiveCodes != null) {
-                for (CdInactiveProducts inp : inactiveCodes) {
-                    vec.add(inp.getHistoryDate());
-                }
-            }
-        } catch (Exception e) {
-            e.printStackTrace();
+            return findInactiveDates(em, din);
         } finally {
             JpaUtils.close(em);
         }
-        return vec;
+    }
+
+    // Let lookup failures propagate to XML-RPC as faults: an empty vector means
+    // a successful lookup found no inactive product, never a database failure.
+    static Vector<java.util.Date> findInactiveDates(EntityManager em, String din) {
+        List<CdInactiveProducts> products = em.createNamedQuery(
+                "CdInactiveProducts.findByDrugIdentificationNumber", CdInactiveProducts.class)
+                .setParameter("drugIdentificationNumber", din).getResultList();
+        Vector<java.util.Date> dates = new Vector<>();
+        for (CdInactiveProducts product : products) {
+            if (product.getHistoryDate() == null) {
+                throw new IllegalStateException("Inactive product has no history date");
+            }
+            dates.add(product.getHistoryDate());
+        }
+        return dates;
     }
 
     /**
