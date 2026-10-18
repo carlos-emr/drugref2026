@@ -26,6 +26,7 @@ import java.util.List;
 import java.util.Vector;
 
 import jakarta.persistence.EntityManager;
+import jakarta.persistence.NonUniqueResultException;
 import jakarta.persistence.Query;
 
 import org.apache.logging.log4j.Logger;
@@ -330,9 +331,10 @@ public class TablesDao {
         return results;
     }
     /**
-     * Dennis Warren Colcamex Resources
-     * @param DIN
-     * @return
+     * Resolves a DIN to the DPD drug code of its product.
+     *
+     * @param DIN the Drug Identification Number
+     * @return the product's drug code, or {@code null} when no product carries that DIN
      */
     public Integer getDrugIdFromDIN(String DIN) {
     	// try/finally close: an unclosed EntityManager pins its pooled JDBC
@@ -341,13 +343,39 @@ public class TablesDao {
     	// 32-connection pool within two searches on a live deployment.
     	EntityManager em = JpaUtils.createEntityManager();
     	try {
-    		Query drugProductByDIN = em.createNamedQuery("CdDrugProduct.findByDrugIdentificationNumber");
-    		drugProductByDIN.setParameter("drugIdentificationNumber", DIN);
-    		CdDrugProduct drugProduct = (CdDrugProduct) drugProductByDIN.getSingleResult();
-    		return drugProduct.getDrugCode();
+    		return findDrugIdFromDIN(em, DIN);
     	} finally {
     		JpaUtils.close(em);
     	}
+    }
+
+    /**
+     * The lookup behind {@link #getDrugIdFromDIN(String)}, on a caller-supplied EntityManager.
+     *
+     * <p>A DIN with no product is an ordinary answer: CARLOS asks about historical and imported
+     * DINs that the current extract no longer lists, and then falls back to a name search. It
+     * returns {@code null} instead of throwing {@code NoResultException}, which the XML-RPC layer
+     * logged as an ERROR on every such lookup (carlos-emr/carlos#5006). A database failure, or a
+     * DIN carried by more than one product, still throws: those are not "not found".
+     *
+     * @param em an open EntityManager
+     * @param din the Drug Identification Number
+     * @return the product's drug code, or {@code null} when no product carries that DIN
+     * @throws NonUniqueResultException when more than one product carries the DIN
+     */
+    static Integer findDrugIdFromDIN(EntityManager em, String din) {
+    	List<CdDrugProduct> products = em.createNamedQuery(
+    			"CdDrugProduct.findByDrugIdentificationNumber", CdDrugProduct.class)
+    			.setParameter("drugIdentificationNumber", din)
+    			.setMaxResults(2)
+    			.getResultList();
+    	if (products.isEmpty()) {
+    		return null;
+    	}
+    	if (products.size() > 1) {
+    		throw new NonUniqueResultException("More than one drug product carries DIN " + din);
+    	}
+    	return products.get(0).getDrugCode();
     }
     /**
      * Dennis Warren Colcamex Resources
@@ -372,8 +400,9 @@ public class TablesDao {
      * @return
      */
     public Integer getDrugpKeyFromDIN( String DIN ) {
-    	Integer drugId = getDrugIdFromDIN(DIN);    	
-    	if(drugId > 0) {
+    	Integer drugId = getDrugIdFromDIN(DIN);
+    	// null: no product carries the DIN (see findDrugIdFromDIN).
+    	if(drugId != null && drugId > 0) {
     		return getDrugpKeyFromDrugId(drugId);
     	}
     	return 0;
