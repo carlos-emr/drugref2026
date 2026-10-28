@@ -90,11 +90,16 @@ public class Drugref {
          * Retrieves full drug information by its DIN (Drug Identification Number).
          *
          * <p>First resolves the DIN to an internal primary key, then fetches the
-         * complete drug record. Returns {@code null} if no drug is found for the given DIN.
+         * complete drug record. Returns an empty Vector if no drug carries the given DIN.
+         *
+         * <p>An unknown DIN is an ordinary answer (historical and imported DINs are not in the
+         * current extract), so it is an empty array on the wire, which CARLOS reads as "not found"
+         * and follows with a name search. Returning {@code null} put an XML-RPC empty string on
+         * the wire instead, which a client expecting an array cannot read (carlos-emr/carlos#5006).
          *
          * @param DIN the Drug Identification Number (8-digit Health Canada identifier)
          * @param bvalue if {@code true}, include HTML-formatted content in the result
-         * @return a Vector of Hashtables containing the drug record, or {@code null} if not found
+         * @return a Vector of Hashtables containing the drug record, empty if not found
          */
         public synchronized Vector get_drug_by_DIN(String DIN, boolean bvalue) {
         	Vector drug = null;
@@ -103,7 +108,7 @@ public class Drugref {
         	if( pKey > 0 ) {
         		drug = get_drug(pKey, bvalue);
         	}
-        	return drug;
+        	return drug == null ? new Vector() : drug;
         }
         
         /**
