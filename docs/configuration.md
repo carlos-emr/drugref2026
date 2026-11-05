@@ -68,6 +68,10 @@ TLS without certificate verification. Explicit `sslMode=verify-ca` and
 `sslMode=verify-full` retain certificate and hostname verification respectively;
 the legacy `VERIFY_CA` and `VERIFY_IDENTITY` spellings are also accepted.
 Native `sslMode=allow` retains its certificate-verifying behavior.
+Legacy `tlsVersions` / `enabledTLSProtocols` and `tlsCiphersuites` /
+`enabledSSLCipherSuites` retain their protocol and cipher restrictions through
+the corresponding MariaDB options. Legacy certificate-store aliases remain
+supported as well.
 
 Empty strings read through numeric JDBC getters continue to produce zero by
 default, matching the former driver. `emptyStringsConvertToZero=false` retains
