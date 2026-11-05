@@ -113,6 +113,17 @@ public class StartUp implements ServletContextListener {
 	 */
 	public void contextDestroyed(ServletContextEvent arg0) {
 		logger.info("DRUGREF SHUTTING DOWN");
+        try {
+            InteractionsCheckerFactory.stop();
+        } finally {
+            // A previous worker must finish its commit or recovery before pools close or a new
+            // deployment can run startup recovery against the same tables.
+            try {
+                RxUpdateDBWorker.stopAndAwait();
+            } finally {
+                DrugrefShutdownResources.closeWebapp();
+            }
+        }
 	}
 
 }

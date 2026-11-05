@@ -36,7 +36,8 @@ public class SpringUtils
 {
 	private static final String[] configs={"spring_config.xml"};
 
-	public static ClassPathXmlApplicationContext beanFactory=new ClassPathXmlApplicationContext(configs);
+	public static ClassPathXmlApplicationContext beanFactory=
+            DrugrefShutdownResources.register(new ClassPathXmlApplicationContext(configs));
 
 
 	public static Object getBean(String beanName) {

@@ -20,10 +20,10 @@ In the DevContainer, the Dockerfile copies a properties file to `/root/drugref2.
 
 | Property | Description | Default |
 |----------|-------------|---------|
-| `db_url` | JDBC connection URL | `jdbc:mysql://127.0.0.1:3306/drugref` |
+| `db_url` | JDBC connection URL | `jdbc:mariadb://127.0.0.1:3306/drugref` |
 | `db_user` | Database username | `drugref` |
 | `db_password` | Database password | *(empty)* |
-| `db_driver` | JDBC driver class | `com.mysql.cj.jdbc.Driver` |
+| `db_driver` | JDBC driver class | `org.mariadb.jdbc.Driver` |
 | `sort_down_mfg_tagged_generics` | Sort manufacturer-tagged generics lower in search | `false` |
 | `interaction_base_url` | Medi-Span data server URL | `https://download.oscar-emr.com/ws/rs/accounts` |
 | `scheduled_timer` | Medi-Span status poll interval (ms) | `300000` (5 minutes) |
@@ -50,10 +50,60 @@ The application supports two database backends, selected by the JDBC URL:
 
 | Database | Driver | URL Pattern |
 |----------|--------|-------------|
-| MySQL / MariaDB | `com.mysql.cj.jdbc.Driver` | `jdbc:mysql://host:port/dbname` |
+| MySQL / MariaDB | `org.mariadb.jdbc.Driver` | `jdbc:mariadb://host:port/dbname` |
 | PostgreSQL | `org.postgresql.Driver` | `jdbc:postgresql://host:port/dbname` |
 
-`DrugrefProperties` provides `isMysql()` and `isPostgres()` convenience methods for conditional logic.
+MariaDB Connector/J 3.5.11 supplies the MySQL/MariaDB driver. Existing
+`com.mysql.cj.jdbc.Driver` / `com.mysql.jdbc.Driver` properties and `jdbc:mysql:`
+URLs are translated internally; operators do not need to rewrite existing files.
+The pool, import helper and startup table-swap recovery use the same compatibility
+adapter. `serverTimezone` remains accepted, and UTC is the default only when no
+timezone is configured. Query options in `db_url` are supported without appending
+a second `?`.
+MySQL URLs retain connection-property precedence over URL query options after
+normalization. Native MariaDB URLs retain their opposite precedence: URL query
+options override connection properties. Host-specific options retain their
+host precedence.
+For native URLs, conflicting case variants or aliases for options canonicalized
+by the adapter fail with a configuration error rather than depending on
+property-map iteration order. Other native option names keep MariaDB's behavior.
+Equivalent normalized values remain accepted, including after normalization
+when connection properties are supplied later.
+
+The adapter preserves legacy TLS policy: the default and `sslMode=PREFERRED`
+encrypt when the server supports TLS without verifying its certificate, and
+fall back to plaintext only when TLS is unavailable. `sslMode=trust` requires
+TLS without certificate verification. Explicit `sslMode=verify-ca` and
+`sslMode=verify-full` retain certificate and hostname verification respectively;
+the legacy `VERIFY_CA` and `VERIFY_IDENTITY` spellings are also accepted.
+Native `sslMode=allow` retains its certificate-verifying behavior.
+Normalized MySQL URLs retain their original TLS flag semantics. For native
+`jdbc:mariadb:` URLs, explicit `useSsl`/`useSSL` flags retain MariaDB's exact
+case-sensitive names and values: `true`, `1`, or an empty value enable verified
+TLS. With `useSsl=true`, `trustServerCertificate=true` selects unverified TLS,
+while `disableSslHostnameVerification=true` retains CA verification without
+hostname verification. These two flags do not enable TLS on their own: without
+`useSsl=true`, an explicit `sslMode` is retained and otherwise TLS is disabled. An enabled
+native flag overrides the global `sslMode`; an explicit
+host `sslMode` overrides the global policy. Native address descriptors retain
+MariaDB's supported host, port, type, SSL mode, pipe and local socket fields.
+Other native descriptor fields remain ignored; they do not change global TLS,
+certificate-store or LOCAL INFILE policy. Connections without TLS options retain
+the application's existing PREFERRED default described above.
+Native system-store fallback and LOCAL INFILE flags retain MariaDB's Boolean
+tokens, including an empty value for true; unsupported `yes`/`no` values fail.
+Legacy `tlsVersions` / `enabledTLSProtocols` and `tlsCiphersuites` /
+`enabledSSLCipherSuites` retain their protocol and cipher restrictions through
+the corresponding MariaDB options. Legacy certificate-store aliases remain
+supported as well.
+
+Empty strings read through numeric JDBC getters continue to produce zero by
+default, matching the former driver. `emptyStringsConvertToZero=false` retains
+the explicit opt-out, and string reads still return the original empty string.
+
+`DrugrefProperties.isMysql()` recognizes both MySQL and MariaDB URLs so imported
+search indexes continue to use the MySQL/MariaDB prefix-index syntax.
+`isPostgres()` retains its existing meaning.
 
 ---
 
@@ -64,9 +114,9 @@ Located at `src/main/resources/spring_config.xml`.
 ### DataSource (HikariCP)
 
 ```xml
-<bean id="dataSource" class="com.zaxxer.hikari.HikariDataSource">
+<bean id="dataSource" class="io.github.carlos_emr.drugref2026.util.DrugrefDataSource" destroy-method="close">
     <property name="driverClassName" value="${db_driver}" />
-    <property name="jdbcUrl" value="${db_url}?serverTimezone=UTC" />
+    <property name="jdbcUrl" value="${db_url}" />
     <property name="username" value="${db_user}" />
     <property name="password" value="${db_password}" />
     <property name="maximumPoolSize" value="32" />
@@ -162,6 +212,12 @@ XML-RPC endpoint at `/drugref2/DrugrefService`.
 
 Initializes properties and Medi-Span interaction checker on deployment.
 
+During undeploy, DrugRef stops interaction polling and rejects new database
+updates, then waits for the current update to finish its commit or recovery before
+closing Spring and Hikari. This can delay undeploy while a DPD download or rebuild
+is active; it prevents the old deployment from changing shared tables after a new
+deployment starts recovery.
+
 ### Context Parameters
 
 ```xml
@@ -200,3 +256,14 @@ Located at `src/main/resources/log4j.xml`. Uses Log4j 2 with XML configuration. 
 | `web.xml` | `src/main/webapp/WEB-INF/` | Servlet mapping, listeners, context params |
 | `log4j.xml` | `src/main/resources/` | Logging configuration |
 | `persistence.xml` | `src/main/resources/META-INF/` | JPA persistence unit definition |
+
+## Connector regression tests
+
+`mvn -B -ntp verify` runs the unit suite and packages the WAR. CI also runs
+`MariaDbConnectorTest` against physical MariaDB 11.8.8. For a local disposable
+server, provide `DRUGREF_TEST_MARIADB_URL` (for example,
+`jdbc:mariadb://127.0.0.1:3306/`), `DRUGREF_TEST_MARIADB_USER`, and
+`DRUGREF_TEST_MARIADB_PASSWORD` to the same Maven command. The user must be able
+to create and drop databases: the tests create a uniquely named
+`drugref_connector_*` schema and remove that schema afterward. Without the URL,
+only these physical-server tests are skipped.

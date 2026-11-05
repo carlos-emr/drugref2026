@@ -77,6 +77,7 @@ public class InteractionsCheckerFactory {
 	private static final ScheduledExecutorService delayScheduler = Executors.newScheduledThreadPool(1);
 	/** Thread pool executor used to run load and status-check tasks off the main thread. */
 	private static ExecutorService taskScheduler = null;
+    private static volatile boolean stopping;
 
 
 	/**
@@ -85,7 +86,8 @@ public class InteractionsCheckerFactory {
 	 * <p>Does nothing if no licence key is configured. On first call, obtains the Spring-managed
 	 * thread pool executor and initiates the first data load via the scheduler.</p>
 	 */
-	public static void start(){
+	public static synchronized void start(){
+        if (stopping) return;
 		if(!StringUtils.hasText(licenceKey)) {
 			return;
 		}
@@ -96,6 +98,12 @@ public class InteractionsCheckerFactory {
 		}
 	}
 	
+    /** Stop delayed refreshes before Spring closes its executor and database pool. */
+    public static synchronized void stop() {
+        stopping = true;
+        delayScheduler.shutdownNow();
+    }
+
 	/**
 	 * Central scheduling dispatcher that determines the next action based on the status response.
 	 *
@@ -103,7 +111,8 @@ public class InteractionsCheckerFactory {
 	 *        to trigger a reload, a numeric string (milliseconds) to schedule the next check,
 	 *        or an {@code "ERROR..."} string to record the error
 	 */
-	private static void scheduler(String stat){
+	private static synchronized void scheduler(String stat){
+        if (stopping) return;
 		logger.debug("stat="+stat);
 		if(stat == null){
 			callLoadIn();
