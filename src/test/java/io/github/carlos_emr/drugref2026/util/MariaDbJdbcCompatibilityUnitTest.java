@@ -31,6 +31,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+    /** Map each legacy SSL mode to the corresponding MariaDB verification policy. */
 @Tag("unit")
 class MariaDbJdbcCompatibilityUnitTest {
     @ParameterizedTest
@@ -40,6 +41,7 @@ class MariaDbJdbcCompatibilityUnitTest {
         assertThat(settings.properties().getProperty("sslMode")).isEqualTo(expected);
     }
 
+    /** Keep the legacy TLS flag precedence and remove translated flags before native parsing. */
     @ParameterizedTest
     @CsvSource({"useSSL=false,disable", "useSSL=true,allow", "requireSSL=true,trust",
             "verifyServerCertificate=true,verify-ca", "useSSL=true&requireSSL=true,trust",
@@ -51,6 +53,7 @@ class MariaDbJdbcCompatibilityUnitTest {
                 .doesNotContainKeys("useSsl", "requireSSL", "verifyServerCertificate");
     }
 
+    /** Decode query values once, preserve explicit legacy properties, and verify stable URL normalization. */
     @Test
     void shouldPreserveDecodedPropertyPrecedence_withEncodedUrlOptions() throws Exception {
         String url = "jdbc:mysql:///test?user=query&password=a%26b%2Bc%2525&server%54imezone=America%2FToronto&CONNECTtimeout=99"; // ggignore - synthetic JDBC parsing/trust-store fixture, never a deployed credential
@@ -67,12 +70,14 @@ class MariaDbJdbcCompatibilityUnitTest {
                 .isEqualTo(MariaDbJdbcCompatibility.normalizeUrl(url));
     }
 
+    /** Ensure datasource UTC defaults do not replace an encoded operator-selected timezone. */
     @Test
     void shouldKeepEncodedTimezone_whenDataSourceAddsDefaults() {
         assertThat(DrugrefDataSource.connectionUrl("jdbc:mysql:///test?server%54imezone=Pacific%2FAuckland"))
                 .contains("connectionTimeZone=Pacific%2FAuckland");
     }
 
+    /** Require sanitized failures for unsupported options and malformed credential encodings. */
     @Test
     void shouldRejectUnsupportedConfiguration_withoutEchoingCredentials() {
         assertThatThrownBy(() -> MariaDbJdbcCompatibility.settings(
@@ -83,6 +88,7 @@ class MariaDbJdbcCompatibilityUnitTest {
                 .isInstanceOf(SQLException.class).hasMessage("Invalid database connection configuration").hasNoCause();
     }
 
+    /** Verify sequential failover, disabled redirection and explicit LOCAL INFILE opt-in through native parsing. */
     @Test
     void shouldPreserveFailoverAndFilePolicy_withLegacyOptions() throws Exception {
         var parsed = MariaDbJdbcCompatibility.settings("jdbc:mysql://first:3306,second:3307/test", new Properties());
@@ -97,6 +103,7 @@ class MariaDbJdbcCompatibilityUnitTest {
                 "jdbc:mysql://db/test?allowLoadLocalInfileInPath=/restricted", new Properties())).isInstanceOf(SQLException.class);
     }
 
+    /** Translate supported legacy Boolean and zero-date spellings while refusing invalid values. */
     @Test
     void shouldAcceptLegacySpellings_forBooleansAndZeroDates() throws Exception {
         var parsed = MariaDbJdbcCompatibility.settings("jdbc:mysql://db/test?useOldAliasMetadataBehavior=1&zeroDateTimeBehavior=convertToNull", new Properties());
@@ -106,6 +113,7 @@ class MariaDbJdbcCompatibilityUnitTest {
                 "jdbc:mysql://db/test?allowLoadLocalInfile=invalid", new Properties())).isInstanceOf(SQLException.class);
     }
 
+    /** Keep later connection properties able to strengthen a normalized legacy TLS request. */
     @Test
     void shouldApplySuppliedTlsFlags_afterUrlNormalization() throws Exception {
         Properties properties = new Properties();
@@ -115,6 +123,7 @@ class MariaDbJdbcCompatibilityUnitTest {
         assertThat(parsed.properties()).containsEntry("sslMode", "trust");
     }
 
+    /** Retain single-host credentials and reject per-host policies that a shared native connection cannot represent. */
     @Test
     void shouldPreserveHostCredentialPrecedence_withoutIgnoringUnsupportedPolicies() throws Exception {
         Properties supplied = new Properties();
@@ -128,6 +137,7 @@ class MariaDbJdbcCompatibilityUnitTest {
                 .isInstanceOf(SQLException.class).hasMessage("Invalid database connection configuration");
     }
 
+    /** Limit the unverified optional-TLS marker to legacy PREFERRED and preserve explicit verification. */
     @Test
     void shouldDistinguishLegacyPreferredTls_fromExplicitVerifiedModes() throws Exception {
         var preferred = MariaDbJdbcCompatibility.settings("jdbc:mysql://db/test?sslMode=PREFERRED", new Properties());
@@ -146,6 +156,7 @@ class MariaDbJdbcCompatibilityUnitTest {
                 .isInstanceOf(SQLException.class).hasMessage("Invalid database connection configuration");
     }
 
+    /** Verify each native host retains its translated policy independently of the global default. */
     @ParameterizedTest
     @CsvSource({"DISABLED,DISABLE", "REQUIRED,TRUST", "VERIFY_CA,VERIFY_CA", "VERIFY_IDENTITY,VERIFY_FULL", "ALLOW,ALLOW"})
     void shouldPreserveIndependentTlsPolicies_withMultipleHostDescriptors(String legacy, String expected) throws Exception {
@@ -159,6 +170,7 @@ class MariaDbJdbcCompatibilityUnitTest {
         assertThat(nativeConfig.sslMode()).isEqualTo(org.mariadb.jdbc.export.SslMode.ALLOW);
     }
 
+    /** Reject malformed descriptors and unsupported multi-host policies before native parsing can ignore them. */
     @ParameterizedTest
     @ValueSource(strings = {
             "address=(host=first)junk(port=3306),address=(host=second)",
@@ -174,6 +186,7 @@ class MariaDbJdbcCompatibilityUnitTest {
                 .isInstanceOf(SQLException.class).hasMessage("Invalid database connection configuration");
     }
 
+    /** Keep IPv6 addresses intact when simple hosts and explicit host policies are combined. */
     @Test
     void shouldRetainMixedHostsAndIpv6_withHostSpecificTlsPolicy() throws Exception {
         var settings = MariaDbJdbcCompatibility.settings(
@@ -185,6 +198,7 @@ class MariaDbJdbcCompatibilityUnitTest {
         assertThat(configuration.addresses().get(1).sslMode).isEqualTo(org.mariadb.jdbc.export.SslMode.VERIFY_FULL);
     }
 
+    /** Reject unsupported collations from either property source with a sanitized error. */
     @ParameterizedTest
     @ValueSource(strings = {"latin1_swedish_ci", "utf8_general_ci", "utf16_general_ci", "utf8mb4_general_ci;secret"})
     void shouldRejectUnsupportedCollation_withoutEchoingOptionValues(String collation) {
@@ -198,6 +212,7 @@ class MariaDbJdbcCompatibilityUnitTest {
         }
     }
 
+    /** Accept Unicode-compatible collation settings and allow a supplied blank value to clear a query selection. */
     @Test
     void shouldPreserveUnicodeEncoding_withLegacyNoOpFlagAndSupportedCollation() throws Exception {
         var settings = MariaDbJdbcCompatibility.settings(
@@ -210,6 +225,7 @@ class MariaDbJdbcCompatibilityUnitTest {
                 .doesNotContainKey("connectionCollation");
     }
 
+    /** Restrict protocol token matching to ASCII while leaving credential text unchanged. */
     @Test
     void shouldMatchAsciiProtocolTokens_withoutChangingUnicodeCredentials() throws Exception {
         assertThat(MariaDbJdbcCompatibility.asciiEquals("VERIFY_IDENTITY", "verify_identity")).isTrue();
@@ -286,6 +302,7 @@ class MariaDbJdbcCompatibilityUnitTest {
                 .isInstanceOf(SQLException.class).hasMessage("Invalid database connection configuration");
     }
 
+    /** Reject unsafe or unsupported store locations before any certificate file is opened. */
     @ParameterizedTest
     @ValueSource(strings = {"file://remote/tmp/store.p12", "file://user@localhost/tmp/store.p12"})
     void shouldRejectNonLocalOrAmbiguousFileUris_beforeOpeningCertificateStores(String location) {
@@ -295,6 +312,7 @@ class MariaDbJdbcCompatibilityUnitTest {
                 .isInstanceOf(SQLException.class).hasMessage("Invalid database connection configuration").hasNoCause();
     }
 
+    /** Fail explicitly when a requested cryptographic provider policy cannot be represented. */
     @ParameterizedTest
     @ValueSource(strings = {"fipsCompliantJsse=true", "keyManagerFactoryProvider=explicit",
             "trustManagerFactoryProvider=explicit", "keyStoreProvider=explicit", "sslContextProvider=explicit"})
@@ -303,6 +321,7 @@ class MariaDbJdbcCompatibilityUnitTest {
                 .isInstanceOf(SQLException.class).hasMessage("Invalid database connection configuration");
     }
 
+    /** Validate the final effective security settings after legacy property overrides are applied. */
     @Test
     void shouldApplyFinalSecuritySelections_afterExplicitPropertyOverrides() throws Exception {
         Properties supplied = new Properties();
@@ -316,6 +335,7 @@ class MariaDbJdbcCompatibilityUnitTest {
     }
 
 
+    /** Preserve Connector/J canonical-name precedence regardless of query or Properties iteration order. */
     @ParameterizedTest
     @CsvSource({"tlsVersions,enabledTLSProtocols,enabledSslProtocolSuites,TLSv1.3,TLSv1.2",
             "tlsCiphersuites,enabledSSLCipherSuites,enabledSslCipherSuites,TLS_AES_256_GCM_SHA384,TLS_AES_128_GCM_SHA256"})
@@ -334,6 +354,7 @@ class MariaDbJdbcCompatibilityUnitTest {
     }
 
 
+    /** Retain native list delimiters while preventing filtered cipher lists from reverting to defaults. */
     @Test
     void shouldPreserveNativeTlsListSeparators_withoutRestoringExcludedCiphers() throws Exception {
         Properties supplied = new Properties();
@@ -349,6 +370,7 @@ class MariaDbJdbcCompatibilityUnitTest {
     }
 
 
+    /** Apply canonical legacy TLS-name precedence inside a single host descriptor. */
     @Test
     void shouldRetainCanonicalTlsPrecedence_withSingleHostDescriptors() throws Exception {
         Properties supplied = new Properties();
@@ -360,6 +382,7 @@ class MariaDbJdbcCompatibilityUnitTest {
         }
     }
 
+    /** Match local file URL handling without treating query or fragment text as part of a store filename. */
     @Test
     void shouldPreserveLocalFileUrlComponents_withoutTurningQueryIntoFilename() throws Exception {
         for (String location : new String[]{"file://localhost/tmp/store+100%25.p12", "file:/tmp/store+100%25.p12?ignored",

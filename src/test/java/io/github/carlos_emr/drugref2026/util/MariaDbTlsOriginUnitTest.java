@@ -53,6 +53,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class MariaDbTlsOriginUnitTest {
     @TempDir Path temporary;
 
+    /** Exercise both schemes before and after URL storage so normalization cannot change TLS policy. */
     @ParameterizedTest
     @CsvSource({
             "mysql,useSSL=true,ALLOW",
@@ -81,6 +82,7 @@ class MariaDbTlsOriginUnitTest {
         }
     }
 
+    /** Compare native source precedence with the real parser and retain the opposite legacy precedence. */
     @ParameterizedTest
     @CsvSource({
             "mysql,useSSL=false,useSSL,true,ALLOW",
@@ -111,6 +113,7 @@ class MariaDbTlsOriginUnitTest {
         }
     }
 
+    /** Check that credentials, timeouts and certificate selections follow the same scheme-specific source order. */
     @ParameterizedTest
     @CsvSource({
             "mysql,enabledSslProtocolSuites,TLSv1.2,TLSv1.3",
@@ -145,6 +148,7 @@ class MariaDbTlsOriginUnitTest {
         }
     }
 
+    /** Refuse conflicting aliases before property iteration can choose a weaker security setting. */
     @ParameterizedTest
     @CsvSource({
             "SSLMODE,disable,sslMode,verify-full",
@@ -176,6 +180,7 @@ class MariaDbTlsOriginUnitTest {
         assertInvalidConfiguration(() -> configuration(url("mariadb", ""), propertyConflict, 0));
     }
 
+    /** Accept equivalent aliases while preserving their normalized certificate or transport selection. */
     @ParameterizedTest
     @CsvSource({"SSLMODE,sslMode,verify-full", "TRUSTSTORE,trustStore,roots.p12",
             "trustCertificateKeyStoreUrl,trustStore,roots.p12",
@@ -192,6 +197,7 @@ class MariaDbTlsOriginUnitTest {
         }
     }
 
+    /** Keep the source scheme available when a pool supplies TLS properties after normalizing its URL. */
     @ParameterizedTest
     @ValueSource(strings = {"mysql", "mariadb"})
     void shouldRetainUrlOrigin_whenTlsPropertiesAreSuppliedAfterNormalization(String scheme) throws Exception {
@@ -203,6 +209,7 @@ class MariaDbTlsOriginUnitTest {
         }
     }
 
+    /** Retain optional, non-verifying TLS for the existing application default on either URL scheme. */
     @ParameterizedTest
     @ValueSource(strings = {"mysql", "mariadb"})
     void shouldPreserveCompatibilityDefault_whenNoTlsOptionWasConfigured(String scheme) throws Exception {
@@ -213,6 +220,7 @@ class MariaDbTlsOriginUnitTest {
         }
     }
 
+    /** Compare deprecated native flag tokens directly with MariaDB instead of broadening truthy values. */
     @ParameterizedTest
     @ValueSource(strings = {"true", "1", "", "false", "0", "TRUE", "yes", "2", "invalid", " true "})
     void shouldMatchNativeBooleanTokens_withoutMakingIgnoredValuesWeakenVerification(String value) throws Exception {
@@ -226,6 +234,7 @@ class MariaDbTlsOriginUnitTest {
         }
     }
 
+    /** Preserve native file-access and system-store Boolean tokens, including the empty true value. */
     @ParameterizedTest
     @ValueSource(strings = {"fallbackToSystemTrustStore", "fallbackToSystemKeyStore", "allowLocalInfile"})
     void shouldMatchNativeSecurityBooleanTokens_withoutChangingLegacyAliases(String name) throws Exception {
@@ -244,6 +253,7 @@ class MariaDbTlsOriginUnitTest {
         }
     }
 
+    /** Reject unsupported Boolean spellings before they can enable file access or system-store fallback. */
     @ParameterizedTest
     @ValueSource(strings = {"fallbackToSystemTrustStore", "fallbackToSystemKeyStore", "allowLocalInfile"})
     void shouldRejectInvalidNativeSecurityBooleans_beforeEnablingAdditionalAccess(String name) {
@@ -259,6 +269,7 @@ class MariaDbTlsOriginUnitTest {
         }
     }
 
+    /** Ensure unknown flag capitalization cannot turn verified TLS into an unverified connection. */
     @ParameterizedTest
     @ValueSource(strings = {"TRUSTSERVERCERTIFICATE", "trustservercertificate", "disableSSLHostnameVerification"})
     void shouldIgnoreNoncanonicalNativeFlagNames_withoutRelaxingVerifiedTls(String name) throws Exception {
@@ -269,6 +280,7 @@ class MariaDbTlsOriginUnitTest {
         }
     }
 
+    /** Use a self-signed certificate to distinguish verified native policies from legacy optional TLS. */
     @ParameterizedTest
     @CsvSource({"mysql,useSSL=true,false", "mariadb,useSsl=true,true",
             "mariadb,useSsl=true&disableSslHostnameVerification=true,true",
@@ -285,6 +297,7 @@ class MariaDbTlsOriginUnitTest {
         }
     }
 
+    /** Require every explicitly verified host to reject an untrusted certificate despite global trust flags. */
     @ParameterizedTest
     @ValueSource(strings = {"mysql", "mariadb"})
     void shouldKeepHostVerificationPolicy_aboveGlobalDeprecatedFlags(String scheme) throws Exception {
@@ -307,6 +320,7 @@ class MariaDbTlsOriginUnitTest {
         }
     }
 
+    /** Match MariaDB by ignoring deprecated TLS flags embedded in native host descriptors. */
     @ParameterizedTest
     @ValueSource(strings = {"trustServerCertificate", "disableSslHostnameVerification"})
     void shouldIgnoreNativeDescriptorFlags_thatWouldWeakenGlobalVerification(String name) throws Exception {
@@ -319,6 +333,7 @@ class MariaDbTlsOriginUnitTest {
         }
     }
 
+    /** Retain legacy host overrides while leaving unsupported native fields unable to change global policy. */
     @ParameterizedTest
     @CsvSource({
             "mysql,fallbackToSystemTrustStore,true,false",
@@ -354,6 +369,7 @@ class MariaDbTlsOriginUnitTest {
         }
     }
 
+    /** Compare literal and encoded socket paths with MariaDB across single-host, multi-host and stored URLs. */
     @ParameterizedTest
     @CsvSource({"localSocket,/tmp/MariaDB-test.sock", "localSocket,%2Ftmp%2FMariaDB-test.sock",
             "localSocket,/tmp/MariaDB+100%.sock", "pipe,\\\\.\\pipe\\MariaDB-test",
@@ -376,6 +392,7 @@ class MariaDbTlsOriginUnitTest {
         }
     }
 
+    /** Trust the fixture certificate explicitly, then prove native TLS still rejects a different hostname. */
     @ParameterizedTest
     @ValueSource(strings = {"useSsl", "useSSL"})
     void shouldRejectWrongHostname_whenNativeTlsHasTrustedCertificate(String flag) throws Exception {
@@ -406,6 +423,7 @@ class MariaDbTlsOriginUnitTest {
         }
     }
 
+    /** Prevent connection properties and host fields from replacing the URL-owned provenance markers. */
     @ParameterizedTest
     @ValueSource(strings = {"mysql", "mariadb"})
     void shouldRejectProvenanceOverrides_fromPropertiesOrHostFields(String scheme) {
@@ -420,6 +438,7 @@ class MariaDbTlsOriginUnitTest {
         }
     }
 
+    /** Reject malformed provenance consistently without exposing option values in the exception. */
     @ParameterizedTest
     @ValueSource(strings = {"mysql", "mariadb"})
     void shouldRejectInvalidProvenanceMarker_beforeAndDuringNormalization(String scheme) {
@@ -430,6 +449,7 @@ class MariaDbTlsOriginUnitTest {
                 .isInstanceOf(IllegalArgumentException.class).hasMessage("Invalid database connection configuration").hasNoCause();
     }
 
+    /** Build native configuration after the requested number of URL normalization round trips. */
     private static Configuration configuration(String url, Properties supplied, int rounds) throws SQLException {
         String selected = url;
         for (int index = 0; index < rounds; index++) selected = MariaDbJdbcCompatibility.normalizeUrl(selected);
@@ -437,10 +457,12 @@ class MariaDbTlsOriginUnitTest {
         return Configuration.parse(settings.url(), settings.properties());
     }
 
+    /** Construct a fixture URL with an optional query while keeping the scheme explicit. */
     private static String url(String scheme, String options) {
         return "jdbc:" + scheme + "://localhost/test" + (options.isEmpty() ? "" : "?" + options);
     }
 
+    /** Read the selected native option for source-precedence assertions. */
     private static String configurationValue(Configuration configuration, String name) {
         return switch (name) {
             case "enabledSslProtocolSuites" -> configuration.enabledSslProtocolSuites();
@@ -457,6 +479,7 @@ class MariaDbTlsOriginUnitTest {
         };
     }
 
+    /** Read the native security Boolean covered by each parameterized regression. */
     private static boolean securityBoolean(Configuration configuration, String name) {
         return switch (name) {
             case "fallbackToSystemTrustStore" -> configuration.fallbackToSystemTrustStore();
@@ -466,12 +489,14 @@ class MariaDbTlsOriginUnitTest {
         };
     }
 
+    /** Select the compatibility provider's X.509 trust manager for one effective host policy. */
     private static X509TrustManager trustManager(MariaDbPreferredTlsPlugin plugin, Configuration configuration, HostAddress host)
             throws SQLException {
         return Arrays.stream(plugin.getTrustManager(configuration, new ExceptionFactory(configuration, host), host))
                 .filter(X509TrustManager.class::isInstance).map(X509TrustManager.class::cast).findFirst().orElseThrow();
     }
 
+    /** Accept only certificate rejection or the known JSSE empty-trust-anchor setup failure. */
     private static void assertRejectsUntrustedCertificate(X509TrustManager trust, X509Certificate[] chain) {
         assertThatThrownBy(() -> trust.checkServerTrusted(chain, "RSA"))
                 .isInstanceOfAny(CertificateException.class, RuntimeException.class).satisfies(failure -> {
@@ -482,11 +507,13 @@ class MariaDbTlsOriginUnitTest {
         });
     }
 
+    /** Require a sanitized configuration error without a credential-bearing cause. */
     private static void assertInvalidConfiguration(org.assertj.core.api.ThrowableAssert.ThrowingCallable action) {
         assertThatThrownBy(action).isInstanceOfAny(SQLException.class, IllegalArgumentException.class)
                 .hasMessage("Invalid database connection configuration").hasNoCause();
     }
 
+    /** Load the public certificate fixture; these tests never store a private key in the repository. */
     private static X509Certificate[] chain() throws java.security.cert.CertificateException, java.io.IOException {
         try (var input = MariaDbTlsOriginUnitTest.class.getResourceAsStream("/jdbc/compatibility-server-cert.pem")) {
             return new X509Certificate[]{(X509Certificate) CertificateFactory.getInstance("X.509").generateCertificate(input)};
