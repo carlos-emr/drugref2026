@@ -19,6 +19,8 @@ package io.github.carlos_emr.drugref2026.ca.dpd.fetch;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -79,12 +81,15 @@ class MariaDbConnectorTest {
         String url = base + SCHEMA;
         if (legacy) url = url.replace("jdbc:mariadb:", "jdbc:mysql:");
         url += "?zeroDateTimeBehavior=round&useOldAliasMetadataBehavior=true&sslMode=DISABLED"
-                + "&forceConnectionTimeZoneToSession=true&user=wrong&password=wrong";
+                + "&forceConnectionTimeZoneToSession=true";
+        // Legacy properties override the URL; native MariaDB gives the URL precedence.
+        url += "&user=" + URLEncoder.encode(legacy ? "wrong" : user, StandardCharsets.UTF_8)
+                + "&password=" + URLEncoder.encode(legacy ? "wrong" : password, StandardCharsets.UTF_8);
         try (DrugrefDataSource source = new DrugrefDataSource()) {
             source.setDriverClassName(legacy ? "com.mysql.cj.jdbc.Driver" : "org.mariadb.jdbc.Driver");
             source.setJdbcUrl(url);
-            source.setUsername(user);
-            source.setPassword(password);
+            source.setUsername(legacy ? user : "wrong");
+            source.setPassword(legacy ? password : "wrong"); // ggignore - deliberately invalid test credential
             source.setMaximumPoolSize(1);
             source.setMinimumIdle(0);
             try (Connection connection = source.getConnection(); Statement statement = connection.createStatement()) {

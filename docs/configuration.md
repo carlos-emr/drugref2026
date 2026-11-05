@@ -60,6 +60,14 @@ The pool, import helper and startup table-swap recovery use the same compatibili
 adapter. `serverTimezone` remains accepted, and UTC is the default only when no
 timezone is configured. Query options in `db_url` are supported without appending
 a second `?`.
+MySQL URLs retain connection-property precedence over URL query options after
+normalization. Native MariaDB URLs retain their opposite precedence: URL query
+options override connection properties. Host-specific options retain their
+host precedence.
+For native URLs, conflicting case variants or aliases for one option fail with
+a configuration error rather than depending on property-map iteration order.
+Equivalent normalized values remain accepted, including after normalization
+when connection properties are supplied later.
 
 The adapter preserves legacy TLS policy: the default and `sslMode=PREFERRED`
 encrypt when the server supports TLS without verifying its certificate, and
@@ -68,6 +76,19 @@ TLS without certificate verification. Explicit `sslMode=verify-ca` and
 `sslMode=verify-full` retain certificate and hostname verification respectively;
 the legacy `VERIFY_CA` and `VERIFY_IDENTITY` spellings are also accepted.
 Native `sslMode=allow` retains its certificate-verifying behavior.
+Normalized MySQL URLs retain their original TLS flag semantics. For native
+`jdbc:mariadb:` URLs, explicit `useSsl`/`useSSL` flags retain MariaDB's exact
+case-sensitive names and values: `true`, `1`, or an empty value enable verified
+TLS. `trustServerCertificate` selects unverified TLS, while
+`disableSslHostnameVerification` retains CA verification without hostname
+verification. An enabled native flag overrides the global `sslMode`; an explicit
+host `sslMode` overrides the global policy. Native address descriptors retain
+MariaDB's supported host, port, type, SSL mode, pipe and local socket fields.
+Other native descriptor fields remain ignored; they do not change global TLS,
+certificate-store or LOCAL INFILE policy. Connections without TLS options retain
+the application's existing PREFERRED default described above.
+Native system-store fallback and LOCAL INFILE flags retain MariaDB's Boolean
+tokens, including an empty value for true; unsupported `yes`/`no` values fail.
 Legacy `tlsVersions` / `enabledTLSProtocols` and `tlsCiphersuites` /
 `enabledSSLCipherSuites` retain their protocol and cipher restrictions through
 the corresponding MariaDB options. Legacy certificate-store aliases remain
