@@ -20,7 +20,6 @@ package io.github.carlos_emr.drugref2026.ca.dpd.fetch;
 import java.io.*;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
-import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.*;
@@ -38,6 +37,7 @@ import io.github.carlos_emr.drugref2026.ca.dpd.CdActiveIngredients;
 import io.github.carlos_emr.drugref2026.ca.dpd.CdDrugProduct;
 import io.github.carlos_emr.drugref2026.ca.dpd.CdDrugSearch;
 import io.github.carlos_emr.drugref2026.util.DrugrefProperties;
+import io.github.carlos_emr.drugref2026.util.DrugrefDataSource;
 import io.github.carlos_emr.drugref2026.util.JpaUtils;
 import io.github.carlos_emr.drugref2026.util.MiscUtils;
 
@@ -110,36 +110,18 @@ public class DPDImport {
         return arrList;
     }
 
-    private boolean isTablePresent(String tableName) {//check if a table exists in the database
-        boolean bool = false;
-        Connection con = null;
-        DrugrefProperties dp=DrugrefProperties.getInstance();
-        String dbURL = dp.getDbUrl()+"?serverTimezone=UTC";
-        String dbUser = dp.getDbUser();
-        String dbPassword = dp.getDbPassword();
-
-        try {
-            con = DriverManager.getConnection(dbURL, dbUser, dbPassword);
-
-        } catch (SQLException e) {
-            System.out.println("Connection Failed.");
-            e.printStackTrace();
-            bool = false;
-        }
-        try {
-            DatabaseMetaData dbm = con.getMetaData();
-            ResultSet rs = dbm.getTables(null, null, tableName, null);
-            if (rs.next()) {
-                bool = true;
-            } else {
-                bool = false;
+    private boolean isTablePresent(String tableName) {
+        DrugrefProperties properties = DrugrefProperties.getInstance();
+        try (Connection connection = DrugrefDataSource.connect(properties.getDbUrl(), properties.getDbUser(),
+                properties.getDbPassword(), properties.getProperty("db_driver"))) {
+            DatabaseMetaData metadata = connection.getMetaData();
+            try (ResultSet rows = metadata.getTables(connection.getCatalog(), null, tableName, new String[] {"TABLE"})) {
+                return rows.next();
             }
-            con.close();//release resources
-        } catch (Exception e) {
-            e.printStackTrace();
+        } catch (SQLException failure) {
+            // An unavailable database is not an absent table: abort the import so recovery can run.
+            throw new IllegalStateException("Unable to inspect DrugRef database tables", failure);
         }
-
-        return bool;
     }
 
     /**

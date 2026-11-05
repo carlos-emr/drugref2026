@@ -29,9 +29,9 @@
     <bean class="io.github.carlos_emr.drugref2026.util.SpringPropertyConfigurer" />
 
 	<!-- DataSource (HikariCP) -->
-    <bean id="dataSource" class="com.zaxxer.hikari.HikariDataSource" destroy-method="close">
+    <bean id="dataSource" class="io.github.carlos_emr.drugref2026.util.DrugrefDataSource" destroy-method="close">
         <property name="driverClassName" value="${db_driver}" />
-        <property name="jdbcUrl" value="${db_url}?serverTimezone=UTC" />
+        <property name="jdbcUrl" value="${db_url}" />
         <property name="autoCommit" value="false" />
 
         <property name="username" value="${db_user}" />

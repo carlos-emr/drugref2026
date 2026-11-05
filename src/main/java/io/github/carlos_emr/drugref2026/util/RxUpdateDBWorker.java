@@ -18,8 +18,10 @@ package io.github.carlos_emr.drugref2026.util;
 
 import java.sql.SQLException;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.apache.logging.log4j.Logger;
 
@@ -72,6 +74,66 @@ import io.github.carlos_emr.drugref2026.ca.dpd.history.HistoryUtil;
 public class RxUpdateDBWorker extends Thread{
 
     private static final Logger logger = MiscUtils.getLogger();
+    private static final WorkerLifecycle WORKERS = new WorkerLifecycle();
+
+    /** Start an update only while this deployment is accepting background work. */
+    public static void startUpdate() {
+        WORKERS.start(new RxUpdateDBWorker());
+    }
+
+    /** Finish the active update and its recovery before the servlet container tears down Spring. */
+    public static void stopAndAwait() {
+        WORKERS.stopAndAwait();
+    }
+
+    /** Coordinates launch and shutdown without interrupting DDL or recovery halfway through. */
+    static final class WorkerLifecycle {
+        private Thread active;
+        private final Set<Thread> workers = new LinkedHashSet<>();
+        private boolean stopping;
+
+        /** Register and start atomically so shutdown cannot miss a newly launched update. */
+        synchronized void start(Thread worker) {
+            if (stopping || (active != null && active.isAlive())) {
+                throw new IllegalStateException("DrugRef is stopping or a database update is already active");
+            }
+            workers.removeIf(previous -> !previous.isAlive());
+            active = worker;
+            workers.add(worker);
+            try {
+                worker.start();
+            } catch (RuntimeException | Error failure) {
+                active = null;
+                workers.remove(worker);
+                throw failure;
+            }
+        }
+
+        /** Release the update slot after cleanup, retaining the thread for shutdown until it exits. */
+        synchronized void finished(Thread worker) {
+            if (active == worker) active = null;
+        }
+
+        /** Await completion even if the container interrupts shutdown, then restore its interrupt flag. */
+        void stopAndAwait() {
+            List<Thread> pending;
+            synchronized (this) {
+                stopping = true;
+                pending = List.copyOf(workers);
+            }
+            boolean interrupted = false;
+            for (Thread worker : pending) {
+                while (worker.isAlive()) {
+                    try {
+                        worker.join();
+                    } catch (InterruptedException retry) {
+                        interrupted = true;
+                    }
+                }
+            }
+            if (interrupted) Thread.currentThread().interrupt();
+        }
+    }
 
     /** Default constructor. */
     public RxUpdateDBWorker(){
@@ -283,6 +345,7 @@ public class RxUpdateDBWorker extends Thread{
             // this clear has to be serialized against that check-then-act or a retry racing
             // the end of this run could start a second worker.
             synchronized (Drugref.class) {
+                WORKERS.finished(this);
                 Drugref.UPDATE_DB = false;
             }
         }

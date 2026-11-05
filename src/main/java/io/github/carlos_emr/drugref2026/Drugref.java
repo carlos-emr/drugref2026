@@ -248,8 +248,7 @@ public class Drugref {
             }
 
             try {
-                RxUpdateDBWorker worker = new RxUpdateDBWorker();
-                worker.start();
+                RxUpdateDBWorker.startUpdate();
             } catch (Throwable t) {
                 // The flag is cleared in the worker's finally -- which never runs if the
                 // thread was never started (Thread.start() throws OutOfMemoryError when the

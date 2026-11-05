@@ -174,12 +174,14 @@ public class DrugrefProperties extends Properties{
 	}
 
         /**
-         * Returns the JDBC database URL from the {@code db_url} property.
+         * Returns the canonical connection URL derived from {@code db_url}.
+         * Legacy MySQL URLs are translated to MariaDB and UTC is added only when
+         * no operator timezone is configured; other JDBC schemes are preserved.
          *
-         * @return the database connection URL string
+         * @return the normalized database connection URL string
          */
         public String getDbUrl(){
-            return getProperty("db_url");
+            return DrugrefDataSource.connectionUrl(getProperty("db_url"));
         }
 
         /**
@@ -210,15 +212,13 @@ public class DrugrefProperties extends Properties{
         }
 
         /**
-         * Checks whether the configured database is MySQL based on the JDBC URL.
+         * Checks whether the configured database uses the MySQL/MariaDB SQL dialect.
          *
-         * @return {@code true} if the db_url contains "mysql"
+         * @return {@code true} for MySQL and MariaDB JDBC URLs
          */
         public boolean isMysql(){
-            if(getDbUrl().contains("mysql"))
-                return true;
-            else
-                return false;
+            String url = getDbUrl();
+            return url != null && (url.startsWith("jdbc:mysql:") || url.startsWith("jdbc:mariadb:"));
         }
         /**
          * Checks whether the configured database is PostgreSQL based on the JDBC URL.

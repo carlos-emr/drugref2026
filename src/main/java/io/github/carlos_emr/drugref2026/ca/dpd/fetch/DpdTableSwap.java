@@ -18,7 +18,6 @@ package io.github.carlos_emr.drugref2026.ca.dpd.fetch;
 
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
-import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -29,6 +28,7 @@ import org.apache.logging.log4j.Logger;
 
 import io.github.carlos_emr.drugref2026.util.DrugrefProperties;
 import io.github.carlos_emr.drugref2026.util.MiscUtils;
+import io.github.carlos_emr.drugref2026.util.DrugrefDataSource;
 
 /**
  * Keeps the previous drug dataset alive as a set of {@code *_prev} tables for the
@@ -112,10 +112,7 @@ public final class DpdTableSwap {
     /** Uses the database configured in {@link DrugrefProperties}. */
     public DpdTableSwap() {
         DrugrefProperties dp = DrugrefProperties.getInstance();
-        // No query string is appended here for the same reason spring_config.xml
-        // appends exactly one: db_url is documented as carrying no parameters of
-        // its own. This connection needs no session settings, so it takes the URL
-        // as configured rather than adding a second '?'.
+        // Resolve the same compatible URL as the pool, including legacy MySQL settings.
         this.jdbcUrl = dp.getDbUrl();
         this.user = dp.getDbUser();
         this.password = dp.getDbPassword();
@@ -621,26 +618,14 @@ public final class DpdTableSwap {
     }
 
     /**
-     * Opens a connection, registering the configured JDBC driver first.
+     * Opens a connection through the configured driver and the migration adapter.
      *
-     * <p>The {@code Class.forName} is load-bearing, not belt-and-braces. This class is
-     * the first thing in the webapp to open a JDBC connection: {@link #restoreIfInterrupted()}
-     * runs from the {@code ServletContextListener}, before Spring builds the pool, and at
-     * that point {@link DriverManager} has not yet discovered the driver sitting in
-     * {@code WEB-INF/lib}. Without this the startup repair failed on every boot with
-     * "No suitable driver found", was swallowed by the caller's catch, and silently did
-     * nothing — which is only visible in a real deployment, since a plain JVM (the unit
-     * tests) registers the driver through the ServiceLoader long before this runs.
+     * <p>Startup recovery runs before Spring creates the pool. The shared connection helper
+     * explicitly selects the MariaDB compatibility adapter rather than relying on the
+     * container's DriverManager service-discovery order.
      */
     private Connection connect() throws SQLException {
-        if (driverClass != null && !driverClass.isEmpty()) {
-            try {
-                Class.forName(driverClass);
-            } catch (ClassNotFoundException e) {
-                throw new SQLException("JDBC driver " + driverClass + " is not on the classpath", e);
-            }
-        }
-        return DriverManager.getConnection(jdbcUrl, user, password);
+        return DrugrefDataSource.connect(jdbcUrl, user, password, driverClass);
     }
 
     static boolean tableExists(Connection con, String table) throws SQLException {
