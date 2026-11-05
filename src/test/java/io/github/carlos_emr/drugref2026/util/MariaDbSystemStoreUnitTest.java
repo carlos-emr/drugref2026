@@ -75,6 +75,7 @@ class MariaDbSystemStoreUnitTest {
         }
     }
 
+    /** Require an explicit failure when a selected client identity is missing, malformed or password-protected. */
     @ParameterizedTest
     @ValueSource(strings = {"missing", "malformed", "password"})
     void shouldRefuseConfiguredClientIdentity_whenSystemStoreCannotLoad(String failure) throws Exception {
@@ -88,6 +89,7 @@ class MariaDbSystemStoreUnitTest {
                 .hasNoCause();
     }
 
+    /** Keep a disabled system-store fallback from loading or failing on an unrelated configured identity. */
     @Test
     void shouldIgnoreSystemClientStore_whenFallbackIsDisabled() throws Exception {
         setSystemStore(KEY_STORE, temporary.resolve("missing.p12"), STORE_PASSWORD);
@@ -95,12 +97,14 @@ class MariaDbSystemStoreUnitTest {
         assertThat(new MariaDbPreferredTlsPlugin().getKeyManager(configuration, errors(configuration))).isNull();
     }
 
+    /** Allow connections without client authentication when no system identity was selected. */
     @Test
     void shouldPermitOptionalClientAuthentication_withoutConfiguredSystemStore() throws Exception {
         Configuration configuration = configuration(true);
         assertThat(new MariaDbPreferredTlsPlugin().getKeyManager(configuration, errors(configuration))).isNull();
     }
 
+    /** Confirm that an available system keystore supplies a client key manager. */
     @Test
     void shouldLoadConfiguredSystemClientStore_whenStoreIsValid() throws Exception {
         Path store = temporary.resolve("valid-client.p12");
@@ -110,6 +114,7 @@ class MariaDbSystemStoreUnitTest {
         assertThat(new MariaDbPreferredTlsPlugin().getKeyManager(configuration, errors(configuration))).hasSize(1);
     }
 
+    /** Prevent a missing selected trust store from silently falling back to public roots. */
     @Test
     void shouldRefuseSystemTrustStore_whenConfiguredFileIsMissing() throws Exception {
         setSystemStore(TRUST_STORE, temporary.resolve("missing-trust.p12"), STORE_PASSWORD);
@@ -118,6 +123,7 @@ class MariaDbSystemStoreUnitTest {
                 .isInstanceOf(SQLException.class).hasMessage("Could not initialize database certificate verification").hasNoCause();
     }
 
+    /** Reject an unreadable selected trust store without exposing its password in the exception. */
     @Test
     void shouldRefuseSystemTrustStore_whenStorePasswordIsWrong() throws Exception {
         Path store = temporary.resolve("trust.p12");
@@ -128,6 +134,7 @@ class MariaDbSystemStoreUnitTest {
                 .isInstanceOf(SQLException.class).hasMessage("Could not initialize database certificate verification").hasNoCause();
     }
 
+    /** Load supported file URL spellings while preserving the caller's system properties and fallback settings. */
     @ParameterizedTest
     @ValueSource(strings = {"plain", "encoded", "raw", "localhost", "query", "fragment"})
     void shouldLoadSystemStores_withoutChangingTheirConfiguredLocations(String spelling) throws Exception {
@@ -158,6 +165,7 @@ class MariaDbSystemStoreUnitTest {
         assertThat(System.getProperty(TRUST_STORE)).isEqualTo(location);
     }
 
+    /** Give explicit connection stores precedence over unusable system defaults. */
     @Test
     void shouldKeepExplicitStores_whenSystemDefaultsAreUnusable() throws Exception {
         Path store = temporary.resolve("explicit.p12");
@@ -172,6 +180,7 @@ class MariaDbSystemStoreUnitTest {
         assertNoTrustAnchors(plugin.getTrustManager(configuration, errors(configuration), host()));
     }
 
+    /** Keep disabled system trust fallback from reintroducing unrelated trust anchors. */
     @Test
     void shouldIgnoreSystemTrustStore_whenFallbackIsDisabled() throws Exception {
         setSystemStore(TRUST_STORE, temporary.resolve("missing-trust.p12"), STORE_PASSWORD);
@@ -179,6 +188,7 @@ class MariaDbSystemStoreUnitTest {
         assertNoTrustAnchors(new MariaDbPreferredTlsPlugin().getTrustManager(configuration, errors(configuration), host()));
     }
 
+    /** Recover a selected client key only when its explicit private-key password is valid. */
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void shouldHonorExplicitNativeKeyPassword_forSystemSelectedStore(boolean valid) throws Exception {
@@ -196,6 +206,7 @@ class MariaDbSystemStoreUnitTest {
         }
     }
 
+    /** Exercise default key-password recovery and require failure instead of anonymous client authentication. */
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void shouldRecoverDefaultClientKey_onlyWithMatchingStorePassword(boolean matching) throws Exception {
@@ -213,6 +224,7 @@ class MariaDbSystemStoreUnitTest {
         }
     }
 
+    /** Ensure connection-store passwords are never substituted for missing JSSE system-store passwords. */
     @Test
     void shouldKeepSystemPasswordsIndependent_fromConnectionStorePasswords() throws Exception {
         Path store = temporary.resolve("system-password.p12");
@@ -227,6 +239,7 @@ class MariaDbSystemStoreUnitTest {
         assertNoTrustAnchors(new MariaDbPreferredTlsPlugin().getTrustManager(configuration, errors(configuration), host()));
     }
 
+    /** Verify that the key manager exposes the exact generated client private key. */
     private static void assertRecoveredKey(Configuration configuration, java.security.PrivateKey expected) throws SQLException {
         var managers = new MariaDbPreferredTlsPlugin().getKeyManager(configuration, errors(configuration));
         var manager = java.util.Arrays.stream(managers).filter(X509KeyManager.class::isInstance)
@@ -234,11 +247,13 @@ class MariaDbSystemStoreUnitTest {
         assertThat(manager.getPrivateKey("synthetic-client")).isEqualTo(expected);
     }
 
+    /** Require a sanitized authentication-setup failure when the selected client identity cannot be recovered. */
     private static void assertClientIdentityRefused(Configuration configuration) {
         assertThatThrownBy(() -> new MariaDbPreferredTlsPlugin().getKeyManager(configuration, errors(configuration)))
                 .isInstanceOf(SQLException.class).hasMessage("Could not initialize database client certificate authentication").hasNoCause();
     }
 
+    /** Check every returned trust manager so an unexpected manager cannot restore default public roots. */
     private static void assertNoTrustAnchors(javax.net.ssl.TrustManager[] managers) {
         assertThat(managers).isNotEmpty();
         for (var manager : managers) {
@@ -247,6 +262,7 @@ class MariaDbSystemStoreUnitTest {
         }
     }
 
+    /** Build verified TLS configuration with an explicit client system-store fallback choice. */
     private static Configuration configuration(boolean fallback) throws SQLException {
         Properties properties = new Properties();
         properties.setProperty("sslMode", "verify-full");
@@ -254,18 +270,22 @@ class MariaDbSystemStoreUnitTest {
         return Configuration.parse("jdbc:mariadb://localhost/test", properties);
     }
 
+    /** Create the native exception factory for the synthetic fixture host. */
     private static ExceptionFactory errors(Configuration configuration) {
         return new ExceptionFactory(configuration, host());
     }
 
+    /** Use a stable local host identity for certificate-store policy tests. */
     private static HostAddress host() { return HostAddress.from("localhost", 3306); }
 
+    /** Configure a fixture store with its own JSSE password and PKCS12 type. */
     private static void setSystemStore(String property, Path store, String password) {
         System.setProperty(property, store.toString());
         System.setProperty(property + "Password", password);
         System.setProperty(property + "Type", "PKCS12");
     }
 
+    /** Write an empty temporary PKCS12 store to isolate loading behavior from certificate trust. */
     private static void writeStore(Path store) throws java.security.GeneralSecurityException, java.io.IOException {
         KeyStore keys = KeyStore.getInstance("PKCS12");
         keys.load(null, null);
@@ -274,6 +294,7 @@ class MariaDbSystemStoreUnitTest {
         }
     }
 
+    /** Generate a temporary private key with an independently selected entry password. */
     private static java.security.PrivateKey writeProtectedKeyStore(Path store, String keyPassword)
             throws java.security.GeneralSecurityException, java.io.IOException {
         var generator = java.security.KeyPairGenerator.getInstance("RSA");

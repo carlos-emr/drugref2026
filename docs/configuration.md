@@ -64,8 +64,9 @@ MySQL URLs retain connection-property precedence over URL query options after
 normalization. Native MariaDB URLs retain their opposite precedence: URL query
 options override connection properties. Host-specific options retain their
 host precedence.
-For native URLs, conflicting case variants or aliases for one option fail with
-a configuration error rather than depending on property-map iteration order.
+For native URLs, conflicting case variants or aliases for options canonicalized
+by the adapter fail with a configuration error rather than depending on
+property-map iteration order. Other native option names keep MariaDB's behavior.
 Equivalent normalized values remain accepted, including after normalization
 when connection properties are supplied later.
 
@@ -79,9 +80,11 @@ Native `sslMode=allow` retains its certificate-verifying behavior.
 Normalized MySQL URLs retain their original TLS flag semantics. For native
 `jdbc:mariadb:` URLs, explicit `useSsl`/`useSSL` flags retain MariaDB's exact
 case-sensitive names and values: `true`, `1`, or an empty value enable verified
-TLS. `trustServerCertificate` selects unverified TLS, while
-`disableSslHostnameVerification` retains CA verification without hostname
-verification. An enabled native flag overrides the global `sslMode`; an explicit
+TLS. With `useSsl=true`, `trustServerCertificate=true` selects unverified TLS,
+while `disableSslHostnameVerification=true` retains CA verification without
+hostname verification. These two flags do not enable TLS on their own: without
+`useSsl=true`, an explicit `sslMode` is retained and otherwise TLS is disabled. An enabled
+native flag overrides the global `sslMode`; an explicit
 host `sslMode` overrides the global policy. Native address descriptors retain
 MariaDB's supported host, port, type, SSL mode, pipe and local socket fields.
 Other native descriptor fields remain ignored; they do not change global TLS,
