@@ -169,6 +169,29 @@ class MariaDbConnectorTest {
         }
     }
 
+    /** #5969: Connector/J's yes/no Boolean spellings failed every MariaDB connection before translation. */
+    @Test
+    void shouldConnectAndApplyConnectorJYesNo_forLegacyBooleanOptions() throws Exception {
+        String url = (base + SCHEMA).replace("jdbc:mariadb:", "jdbc:mysql:") + "?allowPublicKeyRetrieval=yes"
+                + "&useServerPrepStmts=YES&cachePrepStmts=No&tcpKeepAlive=Yes&allowMultiQueries=yes&useAffectedRows=no";
+        try (Connection connection = DrugrefDataSource.connect(url, user, password, "com.mysql.cj.jdbc.Driver");
+             Statement statement = connection.createStatement()) {
+            var configuration = connection.unwrap(org.mariadb.jdbc.Connection.class).getContext().getConf();
+            assertThat(configuration.allowPublicKeyRetrieval()).isTrue();
+            assertThat(configuration.useServerPrepStmts()).isTrue();
+            assertThat(configuration.cachePrepStmts()).isFalse();
+            assertThat(configuration.tcpKeepAlive()).isTrue();
+            assertThat(configuration.allowMultiQueries()).isTrue();
+            assertThat(configuration.useAffectedRows()).isFalse();
+            statement.execute("CREATE TABLE yes_no_probe (id int primary key, label varchar(10))");
+            // allowMultiQueries=yes: one statement string carries two inserts.
+            statement.execute("INSERT INTO yes_no_probe VALUES (1, 'same'); INSERT INTO yes_no_probe VALUES (2, 'same')");
+            // useAffectedRows=no keeps Connector/J's found-rows count for a row that does not change.
+            assertThat(statement.executeUpdate("UPDATE yes_no_probe SET label='same' WHERE id=1")).isEqualTo(1);
+            statement.execute("DROP TABLE yes_no_probe");
+        }
+    }
+
     /** Keep the former driver's default rejection of zero dates explicit. */
     @Test
     void shouldRejectZeroDates_byDefaultRatherThanSilentlyReturningNull() throws Exception {
