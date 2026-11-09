@@ -229,4 +229,20 @@ class MariaDbLegacyBooleanOptionUnitTest {
         var configuration = Configuration.parse(settings.url(), settings.properties());
         assertThat(configuration.servicePrincipalName()).isEqualTo("no");
     }
+
+    @Test
+    @DisplayName("should never rewrite credentials that read yes or no")
+    void shouldKeepCredentialsVerbatim_whenTheyReadYesOrNo() throws Exception {
+        Properties supplied = new Properties();
+        supplied.setProperty("password", "No"); // ggignore - synthetic parsing fixture, never a deployed credential
+
+        var fromProperties = MariaDbJdbcCompatibility.settings(LEGACY + "?user=yes", supplied);
+        var fromHost = MariaDbJdbcCompatibility.settings(
+                "jdbc:mysql://no:YES@db/test", new Properties()); // ggignore - synthetic parsing fixture, never a deployed credential
+
+        assertThat(fromProperties.properties()).containsEntry("user", "yes")
+                .containsEntry("password", "No"); // ggignore - synthetic parsing fixture, never a deployed credential
+        assertThat(fromHost.properties()).containsEntry("user", "no")
+                .containsEntry("password", "YES"); // ggignore - synthetic parsing fixture, never a deployed credential
+    }
 }
