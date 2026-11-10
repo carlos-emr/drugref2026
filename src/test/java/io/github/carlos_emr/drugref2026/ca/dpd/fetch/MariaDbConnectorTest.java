@@ -27,6 +27,7 @@ import java.sql.Statement;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.Properties;
+import java.util.Map;
 import java.util.UUID;
 
 import org.junit.jupiter.api.AfterAll;
@@ -226,6 +227,43 @@ class MariaDbConnectorTest {
             }
             statement.execute("DROP TABLE number_probe");
         }
+    }
+
+    /** Pin Connector/J's numeric truth rule for TINYINT(1), including negative and NULL object reads. */
+    @Test
+    void shouldPreserveTinyIntNumericTruth_withNativeAndLegacyConfiguration() throws Exception {
+        for (boolean legacy : new boolean[]{false, true}) {
+            for (boolean serverPrepared : new boolean[]{false, true}) {
+                String url = base + SCHEMA + "?useServerPrepStmts=" + serverPrepared;
+                if (legacy) url = url.replace("jdbc:mariadb:", "jdbc:mysql:");
+                try (Connection connection = DrugrefDataSource.connect(url, user, password, "com.mysql.cj.jdbc.Driver");
+                     Statement statement = connection.createStatement()) {
+                    statement.execute("CREATE TEMPORARY TABLE tiny_boolean_probe(id INT PRIMARY KEY, flag TINYINT(1))");
+                    statement.execute("INSERT INTO tiny_boolean_probe VALUES (1, -128), (2, -2), (3, -1), "
+                            + "(4, 0), (5, 1), (6, 127), (7, NULL)");
+                    try (var query = connection.prepareStatement("SELECT flag FROM tiny_boolean_probe WHERE id >= ? ORDER BY id")) {
+                        query.setInt(1, 1);
+                        try (var rows = query.executeQuery()) {
+                            assertTinyIntTruthValues(rows);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private static void assertTinyIntTruthValues(java.sql.ResultSet rows) throws SQLException {
+        for (Boolean expected : new Boolean[]{false, false, true, false, true, true, null}) {
+            assertThat(rows.next()).isTrue();
+            assertThat(rows.getObject(1)).isEqualTo(expected);
+            assertThat(rows.wasNull()).isEqualTo(expected == null);
+            assertThat(rows.getObject("flag")).isEqualTo(expected);
+            assertThat(rows.getObject(1, Map.of())).isEqualTo(expected);
+            assertThat(rows.getObject("flag", Boolean.class)).isEqualTo(expected);
+            assertThat(rows.getBoolean(1)).isEqualTo(Boolean.TRUE.equals(expected));
+            assertThat(rows.wasNull()).isEqualTo(expected == null);
+        }
+        assertThat(rows.next()).isFalse();
     }
 
     /** Keep the former driver's default rejection of zero dates explicit. */
