@@ -27,6 +27,7 @@ import java.sql.Statement;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.Properties;
+import java.util.Map;
 import java.util.UUID;
 
 import org.junit.jupiter.api.AfterAll;
@@ -166,6 +167,163 @@ class MariaDbConnectorTest {
         } finally {
             properties.clear();
             properties.putAll(previous);
+        }
+    }
+
+    /** #5969: Connector/J's yes/no Boolean spellings failed every MariaDB connection before translation. */
+    @Test
+    void shouldConnectAndApplyConnectorJYesNo_forLegacyBooleanOptions() throws Exception {
+        String url = (base + SCHEMA).replace("jdbc:mariadb:", "jdbc:mysql:") + "?allowPublicKeyRetrieval=yes"
+                + "&useServerPrepStmts=YES&cachePrepStmts=No&tcpKeepAlive=Yes&allowMultiQueries=yes&useAffectedRows=no";
+        try (Connection connection = DrugrefDataSource.connect(url, user, password, "com.mysql.cj.jdbc.Driver");
+             Statement statement = connection.createStatement()) {
+            var configuration = connection.unwrap(org.mariadb.jdbc.Connection.class).getContext().getConf();
+            assertThat(configuration.allowPublicKeyRetrieval()).isTrue();
+            assertThat(configuration.useServerPrepStmts()).isTrue();
+            assertThat(configuration.cachePrepStmts()).isFalse();
+            assertThat(configuration.tcpKeepAlive()).isTrue();
+            assertThat(configuration.allowMultiQueries()).isTrue();
+            assertThat(configuration.useAffectedRows()).isFalse();
+            statement.execute("CREATE TABLE yes_no_probe (id int primary key, label varchar(10))");
+            // allowMultiQueries=yes: one statement string carries two inserts.
+            statement.execute("INSERT INTO yes_no_probe VALUES (1, 'same'); INSERT INTO yes_no_probe VALUES (2, 'same')");
+            // useAffectedRows=no keeps Connector/J's found-rows count for a row that does not change.
+            assertThat(statement.executeUpdate("UPDATE yes_no_probe SET label='same' WHERE id=1")).isEqualTo(1);
+            statement.execute("DROP TABLE yes_no_probe");
+        }
+    }
+
+    /** carlos-emr/carlos#5968: values read from the same rows through MySQL Connector/J 9.6.0. */
+    @Test
+    void shouldPreserveConnectorJValues_forFloatingAndBitColumns() throws Exception {
+        String url = (base + SCHEMA).replace("jdbc:mariadb:", "jdbc:mysql:");
+        try (Connection connection = DrugrefDataSource.connect(url, user, password, "com.mysql.cj.jdbc.Driver");
+             Statement statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE number_probe (id int primary key, d double, f float, b1 bit(1), b8 bit(8), "
+                    + "b64 bit(64), t1 tinyint(1))");
+            statement.execute("INSERT INTO number_probe VALUES (1, 100, 1.1, b'1', 5, 3, -1), "
+                    + "(2, 1.0E7, 16777217, b'0', 0, b'1" + "0".repeat(63) + "', 1), (3, NULL, NULL, NULL, NULL, NULL, NULL)");
+            try (var rows = statement.executeQuery("SELECT * FROM number_probe ORDER BY id")) {
+                assertThat(rows.getMetaData().getColumnClassName(rows.findColumn("b8"))).isEqualTo(Boolean.class.getName());
+                assertThat(rows.next()).isTrue();
+                assertThat(rows.getString("d")).isEqualTo("100.0");
+                assertThat(rows.getBigDecimal("d")).hasToString("100.0");
+                assertThat(rows.getString("f")).isEqualTo("1.1");
+                assertThat(rows.getString("b1")).isEqualTo("1");
+                assertThat(rows.getObject("b1")).isEqualTo(Boolean.TRUE);
+                assertThat(rows.getString("b8")).isEqualTo("5");
+                assertThat(rows.getDouble("b8")).isEqualTo(5.0d);
+                assertThat(rows.getDouble("t1")).isEqualTo(-1.0d);
+                assertThat(rows.next()).isTrue();
+                assertThat(rows.getString("d")).isEqualTo("1.0E7");
+                assertThat(rows.getString("f")).isEqualTo("1.67772E7");
+                assertThat(rows.getString("b1")).isEqualTo("0");
+                assertThat(rows.getString("b64")).isEqualTo("-9223372036854775808");
+                assertThat(rows.getBigDecimal("b64")).hasToString("9223372036854775808");
+                assertThat(rows.next()).isTrue();
+                assertThat(rows.getString("d")).isNull();
+                assertThat(rows.wasNull()).isTrue();
+                assertThat(rows.getObject("b1")).isNull();
+            }
+            statement.execute("DROP TABLE number_probe");
+        }
+    }
+
+    /** Pin Connector/J's numeric truth rule for TINYINT(1), including negative and NULL object reads. */
+    @Test
+    void shouldPreserveTinyIntNumericTruth_withNativeAndLegacyConfiguration() throws Exception {
+        for (boolean legacy : new boolean[]{false, true}) {
+            for (boolean serverPrepared : new boolean[]{false, true}) {
+                for (boolean tinyBit : new boolean[]{false, true}) {
+                    for (boolean transformed : new boolean[]{false, true}) {
+                        assertTinyIntConfiguration(legacy, serverPrepared, tinyBit, transformed);
+                    }
+                }
+            }
+        }
+    }
+
+    private static void assertTinyIntConfiguration(boolean legacy, boolean serverPrepared,
+                                                  boolean tinyBit, boolean transformed) throws Exception {
+        String url = base + SCHEMA + "?useServerPrepStmts=" + serverPrepared
+                + "&tinyInt1isBit=" + tinyBit + "&transformedBitIsBoolean=" + transformed;
+        if (legacy) url = url.replace("jdbc:mariadb:", "jdbc:mysql:");
+        try (Connection connection = DrugrefDataSource.connect(url, user, password, "com.mysql.cj.jdbc.Driver");
+             Statement statement = connection.createStatement()) {
+            statement.execute("CREATE TEMPORARY TABLE tiny_boolean_probe(id INT PRIMARY KEY, flag TINYINT(1))");
+            statement.execute("INSERT INTO tiny_boolean_probe VALUES (1, -128), (2, -2), (3, -1), "
+                    + "(4, 0), (5, 1), (6, 127), (7, NULL)");
+            try (var query = connection.prepareStatement("SELECT flag FROM tiny_boolean_probe WHERE id >= ? ORDER BY id")) {
+                query.setInt(1, 1);
+                try (var rows = query.executeQuery()) {
+                    if (tinyBit) assertTinyIntTruthValues(rows);
+                    else assertTinyIntIntegerValues(rows);
+                }
+            }
+        }
+    }
+
+    private static void assertTinyIntIntegerValues(java.sql.ResultSet rows) throws SQLException {
+        for (Integer expected : new Integer[]{-128, -2, -1, 0, 1, 127, null}) {
+            assertThat(rows.next()).isTrue();
+            assertThat(rows.getObject(1)).isEqualTo(expected);
+            assertThat(rows.wasNull()).isEqualTo(expected == null);
+            assertThat(rows.getObject("flag")).isEqualTo(expected);
+            assertThat(rows.getObject(1, Map.of())).isEqualTo(expected);
+            assertThat(rows.getString(1)).isEqualTo(expected == null ? null : expected.toString());
+        }
+        assertThat(rows.next()).isFalse();
+    }
+
+    private static void assertTinyIntTruthValues(java.sql.ResultSet rows) throws SQLException {
+        for (Boolean expected : new Boolean[]{false, false, true, false, true, true, null}) {
+            assertThat(rows.next()).isTrue();
+            assertThat(rows.getObject(1)).isEqualTo(expected);
+            assertThat(rows.wasNull()).isEqualTo(expected == null);
+            assertThat(rows.getObject("flag")).isEqualTo(expected);
+            assertThat(rows.getObject(1, Map.of())).isEqualTo(expected);
+            assertThat(rows.getObject("flag", Boolean.class)).isEqualTo(expected);
+            assertThat(rows.getBoolean(1)).isEqualTo(Boolean.TRUE.equals(expected));
+            assertThat(rows.wasNull()).isEqualTo(expected == null);
+        }
+        assertThat(rows.next()).isFalse();
+    }
+
+    /** A primitive Class token does not change getObject's nullable object return contract. */
+    @Test
+    void shouldPreserveNullObjects_forPrimitiveClassTargets() throws Exception {
+        for (boolean legacy : new boolean[]{false, true}) {
+            for (boolean serverPrepared : new boolean[]{false, true}) {
+                String url = base + SCHEMA + "?useServerPrepStmts=" + serverPrepared;
+                if (legacy) url = url.replace("jdbc:mariadb:", "jdbc:mysql:");
+                try (Connection connection = DrugrefDataSource.connect(url, user, password, "com.mysql.cj.jdbc.Driver");
+                     Statement statement = connection.createStatement()) {
+                    statement.execute("CREATE TEMPORARY TABLE numeric_null_probe(b1 BIT(1), b8 BIT(8), b64 BIT(64), "
+                            + "t1 TINYINT(1), d DOUBLE, f FLOAT, n INT, text_value VARCHAR(8))");
+                    statement.execute("INSERT INTO numeric_null_probe VALUES (NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL)");
+                    try (var query = connection.prepareStatement("SELECT * FROM numeric_null_probe WHERE ? = 1")) {
+                        query.setInt(1, 1);
+                        try (var rows = query.executeQuery()) {
+                            assertThat(rows.next()).isTrue();
+                            assertPrimitiveClassNullObjects(rows);
+                            assertThatThrownBy(() -> rows.getObject(1, char.class)).isInstanceOf(SQLException.class);
+                            assertThatThrownBy(() -> rows.getObject(1, void.class)).isInstanceOf(SQLException.class);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private static void assertPrimitiveClassNullObjects(java.sql.ResultSet rows) throws SQLException {
+        for (int column = 1; column <= rows.getMetaData().getColumnCount(); column++) {
+            for (Class<?> type : new Class<?>[]{boolean.class, byte.class, short.class, int.class,
+                    long.class, float.class, double.class}) {
+                assertThat(rows.getObject(column, type)).isNull();
+                assertThat(rows.wasNull()).isTrue();
+                assertThat(rows.getObject(rows.getMetaData().getColumnLabel(column), type)).isNull();
+                assertThat(rows.wasNull()).isTrue();
+            }
         }
     }
 
