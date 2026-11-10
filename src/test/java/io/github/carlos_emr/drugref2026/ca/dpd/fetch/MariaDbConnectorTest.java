@@ -192,6 +192,42 @@ class MariaDbConnectorTest {
         }
     }
 
+    /** carlos-emr/carlos#5968: values read from the same rows through MySQL Connector/J 9.6.0. */
+    @Test
+    void shouldPreserveConnectorJValues_forFloatingAndBitColumns() throws Exception {
+        String url = (base + SCHEMA).replace("jdbc:mariadb:", "jdbc:mysql:");
+        try (Connection connection = DrugrefDataSource.connect(url, user, password, "com.mysql.cj.jdbc.Driver");
+             Statement statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE number_probe (id int primary key, d double, f float, b1 bit(1), b8 bit(8), "
+                    + "b64 bit(64), t1 tinyint(1))");
+            statement.execute("INSERT INTO number_probe VALUES (1, 100, 1.1, b'1', 5, 3, -1), "
+                    + "(2, 1.0E7, 16777217, b'0', 0, b'1" + "0".repeat(63) + "', 1), (3, NULL, NULL, NULL, NULL, NULL, NULL)");
+            try (var rows = statement.executeQuery("SELECT * FROM number_probe ORDER BY id")) {
+                assertThat(rows.getMetaData().getColumnClassName(rows.findColumn("b8"))).isEqualTo(Boolean.class.getName());
+                assertThat(rows.next()).isTrue();
+                assertThat(rows.getString("d")).isEqualTo("100.0");
+                assertThat(rows.getBigDecimal("d")).hasToString("100.0");
+                assertThat(rows.getString("f")).isEqualTo("1.1");
+                assertThat(rows.getString("b1")).isEqualTo("1");
+                assertThat(rows.getObject("b1")).isEqualTo(Boolean.TRUE);
+                assertThat(rows.getString("b8")).isEqualTo("5");
+                assertThat(rows.getDouble("b8")).isEqualTo(5.0d);
+                assertThat(rows.getDouble("t1")).isEqualTo(-1.0d);
+                assertThat(rows.next()).isTrue();
+                assertThat(rows.getString("d")).isEqualTo("1.0E7");
+                assertThat(rows.getString("f")).isEqualTo("1.67772E7");
+                assertThat(rows.getString("b1")).isEqualTo("0");
+                assertThat(rows.getString("b64")).isEqualTo("-9223372036854775808");
+                assertThat(rows.getBigDecimal("b64")).hasToString("9223372036854775808");
+                assertThat(rows.next()).isTrue();
+                assertThat(rows.getString("d")).isNull();
+                assertThat(rows.wasNull()).isTrue();
+                assertThat(rows.getObject("b1")).isNull();
+            }
+            statement.execute("DROP TABLE number_probe");
+        }
+    }
+
     /** Keep the former driver's default rejection of zero dates explicit. */
     @Test
     void shouldRejectZeroDates_byDefaultRatherThanSilentlyReturningNull() throws Exception {

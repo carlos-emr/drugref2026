@@ -113,6 +113,14 @@ Empty strings read through numeric JDBC getters continue to produce zero by
 default, matching the former driver. `emptyStringsConvertToZero=false` retains
 the explicit opt-out, and string reads still return the original empty string.
 
+FLOAT, REAL and DOUBLE columns read as text keep the former driver's printed
+Java double (`100.0`, `1.0E7`) instead of the server's text (`100`), and keep
+its `getBigDecimal` scale. BIT columns read as text keep their signed number
+(`1`, `5`) instead of `b'101'`; BIT(1) reads as a `Boolean` object, BIT metadata
+names `java.lang.Boolean`, and BIT values convert to `double`, `float` and
+`BigDecimal` as unsigned numbers (carlos-emr/carlos#5968). The CARLOS connector
+migration guide lists the few former-driver behaviours that are not reproduced.
+
 `DrugrefProperties.isMysql()` recognizes both MySQL and MariaDB URLs so imported
 search indexes continue to use the MySQL/MariaDB prefix-index syntax.
 `isPostgres()` retains its existing meaning.
