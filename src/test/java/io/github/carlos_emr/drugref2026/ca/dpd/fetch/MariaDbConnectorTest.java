@@ -266,6 +266,44 @@ class MariaDbConnectorTest {
         assertThat(rows.next()).isFalse();
     }
 
+    /** A primitive Class token does not change getObject's nullable object return contract. */
+    @Test
+    void shouldPreserveNullObjects_forPrimitiveClassTargets() throws Exception {
+        for (boolean legacy : new boolean[]{false, true}) {
+            for (boolean serverPrepared : new boolean[]{false, true}) {
+                String url = base + SCHEMA + "?useServerPrepStmts=" + serverPrepared;
+                if (legacy) url = url.replace("jdbc:mariadb:", "jdbc:mysql:");
+                try (Connection connection = DrugrefDataSource.connect(url, user, password, "com.mysql.cj.jdbc.Driver");
+                     Statement statement = connection.createStatement()) {
+                    statement.execute("CREATE TEMPORARY TABLE numeric_null_probe(b1 BIT(1), b8 BIT(8), b64 BIT(64), "
+                            + "t1 TINYINT(1), d DOUBLE, f FLOAT, n INT, text_value VARCHAR(8))");
+                    statement.execute("INSERT INTO numeric_null_probe VALUES (NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL)");
+                    try (var query = connection.prepareStatement("SELECT * FROM numeric_null_probe WHERE ? = 1")) {
+                        query.setInt(1, 1);
+                        try (var rows = query.executeQuery()) {
+                            assertThat(rows.next()).isTrue();
+                            assertPrimitiveClassNullObjects(rows);
+                            assertThatThrownBy(() -> rows.getObject(1, char.class)).isInstanceOf(SQLException.class);
+                            assertThatThrownBy(() -> rows.getObject(1, void.class)).isInstanceOf(SQLException.class);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private static void assertPrimitiveClassNullObjects(java.sql.ResultSet rows) throws SQLException {
+        for (int column = 1; column <= rows.getMetaData().getColumnCount(); column++) {
+            for (Class<?> type : new Class<?>[]{boolean.class, byte.class, short.class, int.class,
+                    long.class, float.class, double.class}) {
+                assertThat(rows.getObject(column, type)).isNull();
+                assertThat(rows.wasNull()).isTrue();
+                assertThat(rows.getObject(rows.getMetaData().getColumnLabel(column), type)).isNull();
+                assertThat(rows.wasNull()).isTrue();
+            }
+        }
+    }
+
     /** Keep the former driver's default rejection of zero dates explicit. */
     @Test
     void shouldRejectZeroDates_byDefaultRatherThanSilentlyReturningNull() throws Exception {
