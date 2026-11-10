@@ -94,14 +94,16 @@ Native system-store fallback and LOCAL INFILE flags retain MariaDB's Boolean
 tokens, including an empty value for true; unsupported `yes`/`no` values fail.
 MySQL-style configuration (`jdbc:mysql:` URLs, with their connection properties
 and address descriptors) keeps MySQL Connector/J's `yes` and `no` spellings, in
-any letter case, for every option MariaDB reads as Boolean, such as
-`allowPublicKeyRetrieval`, `useServerPrepStmts`, `cachePrepStmts`,
-`useCompression`, `allowMultiQueries`, `tcpKeepAlive` and
+any letter case, for every MariaDB connection option backed by a Boolean
+setting, such as `allowPublicKeyRetrieval`, `useServerPrepStmts`,
+`cachePrepStmts`, `useCompression`, `allowMultiQueries`, `tcpKeepAlive` and
 `nullCatalogMeansCurrent`: they become `true` and `false` (carlos-emr/carlos#5969).
-The option list is read from the shipped MariaDB driver. Other values reach
-MariaDB unchanged, which refuses anything but `true`, `false`, `1`, `0` or an
-empty value with an error naming the option. Native `jdbc:mariadb:` URLs keep
-MariaDB's own tokens.
+The option list is read from the shipped MariaDB driver. As in Connector/J,
+these names match without regard to case and the later source wins: one
+spelling is kept per option. For options the adapter does not check itself,
+other values reach MariaDB unchanged, which refuses anything but `true`,
+`false`, `1`, `0` or an empty value with an error naming the option. Native
+`jdbc:mariadb:` URLs do not get this translation.
 Legacy `tlsVersions` / `enabledTLSProtocols` and `tlsCiphersuites` /
 `enabledSSLCipherSuites` retain their protocol and cipher restrictions through
 the corresponding MariaDB options. Legacy certificate-store aliases remain
