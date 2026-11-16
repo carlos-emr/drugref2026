@@ -250,9 +250,9 @@ class MariaDbConnectorTest {
         if (legacy) url = url.replace("jdbc:mariadb:", "jdbc:mysql:");
         try (Connection connection = DrugrefDataSource.connect(url, user, password, "com.mysql.cj.jdbc.Driver");
              Statement statement = connection.createStatement()) {
-            statement.execute("CREATE TEMPORARY TABLE tiny_boolean_probe(id INT PRIMARY KEY, flag TINYINT(1))");
-            statement.execute("INSERT INTO tiny_boolean_probe VALUES (1, -128), (2, -2), (3, -1), "
-                    + "(4, 0), (5, 1), (6, 127), (7, NULL)");
+            statement.execute("CREATE TEMPORARY TABLE tiny_boolean_probe(id INT PRIMARY KEY, flag TINYINT(1), bit BIT(1))");
+            statement.execute("INSERT INTO tiny_boolean_probe VALUES (1, -128, b'1'), (2, -2, b'0'), (3, -1, NULL), "
+                    + "(4, 0, NULL), (5, 1, NULL), (6, 127, NULL), (7, NULL, NULL)");
             try (var query = connection.prepareStatement("SELECT flag FROM tiny_boolean_probe WHERE id >= ? ORDER BY id")) {
                 query.setInt(1, 1);
                 try (var rows = query.executeQuery()) {
@@ -260,7 +260,36 @@ class MariaDbConnectorTest {
                     else assertTinyIntIntegerValues(rows);
                 }
             }
+            // transformedBitIsBoolean makes MariaDB alone report a real BIT(1) as BOOLEAN.
+            try (var query = connection.prepareStatement("SELECT bit FROM tiny_boolean_probe WHERE id <= ? ORDER BY id")) {
+                query.setInt(1, 3);
+                try (var rows = query.executeQuery()) {
+                    assertRealBitOneValues(rows);
+                }
+            }
         }
+    }
+
+    /** A real BIT(1) keeps Connector/J's BIT metadata, "1"/"0" text and numeric reads in every metadata mode. */
+    private static void assertRealBitOneValues(java.sql.ResultSet rows) throws SQLException {
+        assertThat(rows.getMetaData().getColumnType(1)).isEqualTo(java.sql.Types.BIT);
+        assertThat(rows.getMetaData().getColumnClassName(1)).isEqualTo(Boolean.class.getName());
+        for (Integer expected : new Integer[]{1, 0, null}) {
+            assertThat(rows.next()).isTrue();
+            String text = expected == null ? null : expected.toString();
+            Double number = expected == null ? null : expected.doubleValue();
+            assertThat(rows.getString(1)).isEqualTo(text);
+            assertThat(rows.wasNull()).isEqualTo(expected == null);
+            assertThat(rows.getObject(1, String.class)).isEqualTo(text);
+            assertThat(rows.getObject(1)).isEqualTo(expected == null ? null : expected == 1);
+            assertThat(rows.getDouble(1)).isEqualTo(expected == null ? 0.0d : number);
+            assertThat(rows.wasNull()).isEqualTo(expected == null);
+            assertThat(rows.getFloat(1)).isEqualTo(expected == null ? 0.0f : number.floatValue());
+            assertThat(rows.getObject(1, Double.class)).isEqualTo(number);
+            assertThat(rows.getObject(1, double.class)).isEqualTo(number);
+            assertThat(rows.getBigDecimal(1)).isEqualTo(expected == null ? null : java.math.BigDecimal.valueOf(expected));
+        }
+        assertThat(rows.next()).isFalse();
     }
 
     private static void assertTinyIntIntegerValues(java.sql.ResultSet rows) throws SQLException {
