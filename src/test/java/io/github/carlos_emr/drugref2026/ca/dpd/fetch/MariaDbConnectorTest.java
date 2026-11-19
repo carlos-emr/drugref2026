@@ -256,6 +256,9 @@ class MariaDbConnectorTest {
             try (var query = connection.prepareStatement("SELECT flag FROM tiny_boolean_probe WHERE id >= ? ORDER BY id")) {
                 query.setInt(1, 1);
                 try (var rows = query.executeQuery()) {
+                    // Connector/J reported a signed TINYINT(1) flag as unsigned; as an integer it stays signed.
+                    assertThat(rows.getMetaData().isSigned(1)).as("signed TINYINT(1) metadata in %s", url)
+                            .isEqualTo(!tinyBit);
                     if (tinyBit) assertTinyIntTruthValues(rows);
                     else assertTinyIntIntegerValues(rows);
                 }
@@ -316,6 +319,119 @@ class MariaDbConnectorTest {
             assertThat(rows.wasNull()).isEqualTo(expected == null);
         }
         assertThat(rows.next()).isFalse();
+    }
+
+    /**
+     * Connector/J padded ZEROFILL floating text to the display width and kept unsigned TINYINT(1) values, which
+     * the shipped schema uses for settings such as 2 and 255, as Integer objects with integer metadata.
+     */
+    @Test
+    void shouldPreserveZeroFilledTextAndUnsignedTinyIntegers_withBothPreparedProtocols() throws Exception {
+        try (Statement statement = administrator.createStatement()) {
+            statement.execute("CREATE TABLE " + SCHEMA + ".numeric_flags(id INT PRIMARY KEY, padded FLOAT(8,2) ZEROFILL, "
+                    + "ordinary FLOAT(8,2) UNSIGNED, tiny TINYINT(1) UNSIGNED)");
+            statement.execute("INSERT INTO " + SCHEMA + ".numeric_flags VALUES (1, 1.25, 1.25, 2), "
+                    + "(2, 1.25, 1.25, 255), (3, NULL, NULL, NULL)");
+        }
+        try {
+            for (boolean legacy : new boolean[]{false, true}) {
+                for (boolean serverPrepared : new boolean[]{false, true}) {
+                    for (boolean transformed : new boolean[]{false, true}) {
+                        String url = base + SCHEMA + "?tinyInt1isBit=true&transformedBitIsBoolean=" + transformed
+                                + "&useServerPrepStmts=" + serverPrepared;
+                        assertZeroFillAndUnsignedTinyIntRows(legacy ? url.replace("jdbc:mariadb:", "jdbc:mysql:") : url);
+                    }
+                }
+            }
+        } finally {
+            try (Statement statement = administrator.createStatement()) {
+                statement.execute("DROP TABLE " + SCHEMA + ".numeric_flags");
+            }
+        }
+    }
+
+    private static void assertZeroFillAndUnsignedTinyIntRows(String url) throws Exception {
+        try (Connection connection = DrugrefDataSource.connect(url, user, password, "com.mysql.cj.jdbc.Driver");
+             var query = connection.prepareStatement("SELECT padded, ordinary, tiny FROM numeric_flags "
+                     + "WHERE id >= ? ORDER BY id")) {
+            query.setInt(1, 1);
+            try (var rows = query.executeQuery()) {
+                var metadata = rows.getMetaData();
+                assertThat(metadata.getColumnClassName(3)).as(url).isEqualTo(Integer.class.getName());
+                assertThat(metadata.getColumnType(3)).as(url).isEqualTo(java.sql.Types.TINYINT);
+                assertThat(metadata.getColumnTypeName(3)).as(url).isEqualTo("TINYINT UNSIGNED");
+                for (Integer tiny : new Integer[]{2, 255, null}) {
+                    assertThat(rows.next()).isTrue();
+                    String padded = tiny == null ? null : "00001.25";
+                    assertThat(rows.getString("padded")).as(url).isEqualTo(padded);
+                    assertThat(rows.wasNull()).isEqualTo(tiny == null);
+                    assertThat(rows.getObject(1, String.class)).as(url).isEqualTo(padded);
+                    assertThat(rows.getString("ordinary")).as(url).isEqualTo(tiny == null ? null : "1.25");
+                    assertThat(rows.getObject(3)).as(url).isEqualTo(tiny);
+                    assertThat(rows.wasNull()).isEqualTo(tiny == null);
+                    assertThat(rows.getObject("tiny")).as(url).isEqualTo(tiny);
+                    assertThat(rows.getObject(3, Map.of())).as(url).isEqualTo(tiny);
+                }
+                assertThat(rows.next()).isFalse();
+            }
+        }
+    }
+
+    /** With jdbcCompliantTruncation (the default), Connector/J refused float reads of a DOUBLE outside float range. */
+    @Test
+    void shouldCheckFloatRange_withBothPreparedProtocols() throws Exception {
+        double boundary = Float.MAX_VALUE;
+        Double[] values = {1e100, -1e100, Math.nextUp(boundary), Math.nextDown(-boundary), boundary, -boundary, null};
+        try (Statement statement = administrator.createStatement()) {
+            statement.execute("CREATE TABLE " + SCHEMA + ".float_probe(id INT PRIMARY KEY, amount DOUBLE)");
+        }
+        try {
+            try (var insert = administrator.prepareStatement("INSERT INTO " + SCHEMA + ".float_probe VALUES (?, ?)")) {
+                for (int index = 0; index < values.length; index++) {
+                    insert.setInt(1, index);
+                    insert.setObject(2, values[index]);
+                    insert.executeUpdate();
+                }
+            }
+            for (boolean legacy : new boolean[]{false, true}) {
+                for (boolean serverPrepared : new boolean[]{false, true}) {
+                    for (boolean strict : new boolean[]{false, true}) {
+                        String url = base + SCHEMA + "?useServerPrepStmts=" + serverPrepared
+                                + "&jdbcCompliantTruncation=" + strict;
+                        assertFloatRangeRows(legacy ? url.replace("jdbc:mariadb:", "jdbc:mysql:") : url,
+                                strict, values, boundary);
+                    }
+                }
+            }
+        } finally {
+            try (Statement statement = administrator.createStatement()) {
+                statement.execute("DROP TABLE " + SCHEMA + ".float_probe");
+            }
+        }
+    }
+
+    private static void assertFloatRangeRows(String url, boolean strict, Double[] values, double boundary) throws Exception {
+        try (Connection connection = DrugrefDataSource.connect(url, user, password, "com.mysql.cj.jdbc.Driver");
+             var query = connection.prepareStatement("SELECT amount FROM float_probe WHERE id >= ? ORDER BY id")) {
+            query.setInt(1, 0);
+            try (var rows = query.executeQuery()) {
+                for (Double value : values) {
+                    assertThat(rows.next()).isTrue();
+                    if (strict && value != null && Math.abs(value) > boundary) {
+                        assertThatThrownBy(() -> rows.getFloat(1)).as(url).isInstanceOfSatisfying(
+                                java.sql.SQLDataException.class, error -> assertThat(error.getSQLState()).isEqualTo("22003"));
+                        assertThatThrownBy(() -> rows.getObject("amount", Float.class)).as(url).isInstanceOfSatisfying(
+                                java.sql.SQLDataException.class, error -> assertThat(error.getSQLState()).isEqualTo("22003"));
+                    } else {
+                        assertThat(rows.getFloat(1)).as(url).isEqualTo(value == null ? 0.0f : value.floatValue());
+                        assertThat(rows.wasNull()).isEqualTo(value == null);
+                        assertThat(rows.getObject("amount", Float.class)).as(url)
+                                .isEqualTo(value == null ? null : value.floatValue());
+                    }
+                }
+                assertThat(rows.next()).isFalse();
+            }
+        }
     }
 
     /** A primitive Class token does not change getObject's nullable object return contract. */
