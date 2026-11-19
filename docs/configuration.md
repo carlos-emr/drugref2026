@@ -92,6 +92,18 @@ certificate-store or LOCAL INFILE policy. Connections without TLS options retain
 the application's existing PREFERRED default described above.
 Native system-store fallback and LOCAL INFILE flags retain MariaDB's Boolean
 tokens, including an empty value for true; unsupported `yes`/`no` values fail.
+MySQL-style configuration (`jdbc:mysql:` URLs, with their connection properties
+and address descriptors) keeps MySQL Connector/J's `yes` and `no` spellings, in
+any letter case, for every MariaDB connection option backed by a Boolean
+setting, such as `allowPublicKeyRetrieval`, `useServerPrepStmts`,
+`cachePrepStmts`, `useCompression`, `allowMultiQueries`, `tcpKeepAlive` and
+`nullCatalogMeansCurrent`: they become `true` and `false` (carlos-emr/carlos#5969).
+The option list is read from the shipped MariaDB driver. As in Connector/J,
+these names match without regard to case and the later source wins: one
+spelling is kept per option. For options the adapter does not check itself,
+other values reach MariaDB unchanged, which refuses anything but `true`,
+`false`, `1`, `0` or an empty value with an error naming the option. Native
+`jdbc:mariadb:` URLs do not get this translation.
 Legacy `tlsVersions` / `enabledTLSProtocols` and `tlsCiphersuites` /
 `enabledSSLCipherSuites` retain their protocol and cipher restrictions through
 the corresponding MariaDB options. Legacy certificate-store aliases remain
@@ -100,6 +112,14 @@ supported as well.
 Empty strings read through numeric JDBC getters continue to produce zero by
 default, matching the former driver. `emptyStringsConvertToZero=false` retains
 the explicit opt-out, and string reads still return the original empty string.
+
+FLOAT, REAL and DOUBLE columns read as text keep the former driver's printed
+Java double (`100.0`, `1.0E7`) instead of the server's text (`100`), and keep
+its `getBigDecimal` scale. BIT columns read as text keep their signed number
+(`1`, `5`) instead of `b'101'`; BIT(1) reads as a `Boolean` object, BIT metadata
+names `java.lang.Boolean`, and BIT values convert to `double`, `float` and
+`BigDecimal` as unsigned numbers (carlos-emr/carlos#5968). The CARLOS connector
+migration guide lists the few former-driver behaviours that are not reproduced.
 
 `DrugrefProperties.isMysql()` recognizes both MySQL and MariaDB URLs so imported
 search indexes continue to use the MySQL/MariaDB prefix-index syntax.
