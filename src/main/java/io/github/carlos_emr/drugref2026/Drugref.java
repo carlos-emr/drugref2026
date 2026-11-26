@@ -38,6 +38,7 @@ import io.github.carlos_emr.drugref2026.util.JpaUtils;
 import io.github.carlos_emr.drugref2026.util.RxUpdateDBWorker;
 import io.github.carlos_emr.drugref2026.util.SpringUtils;
 import io.github.carlos_emr.drugref2026.util.UpdateStatus;
+import io.github.carlos_emr.drugref2026.util.XmlRpcFaultException;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.Logger;
 import io.github.carlos_emr.drugref2026.util.MiscUtils;
@@ -70,7 +71,15 @@ import io.github.carlos_emr.drugref2026.dinInteractionCheck.InteractionsCheckerF
 public class Drugref {
 
         /** Data access object for querying DPD (Drug Product Database) tables. */
-        TablesDao queryDao = (TablesDao) SpringUtils.getBean("tablesDao");
+        private final TablesDao queryDao;
+
+        public Drugref() {
+            this((TablesDao) SpringUtils.getBean("tablesDao"));
+        }
+
+        Drugref(TablesDao queryDao) {
+            this.queryDao = queryDao;
+        }
 
         /** Stores metadata about the most recent database update (row counts, timing, etc.). */
         public static HashMap<String,Object> DB_INFO=new HashMap<String,Object>();
@@ -89,8 +98,8 @@ public class Drugref {
         /**
          * Retrieves full drug information by its DIN (Drug Identification Number).
          *
-         * <p>First resolves the DIN to an internal primary key, then fetches the
-         * complete drug record. Returns an empty Vector if no drug carries the given DIN.
+         * <p>Uses the DPD drug code of the exact product to load its details.
+         * Returns an empty Vector if no product carries the given DIN.
          *
          * <p>An unknown DIN is an ordinary answer (historical and imported DINs are not in the
          * current extract), so it is an empty array on the wire, which CARLOS reads as "not found"
@@ -100,15 +109,17 @@ public class Drugref {
          * @param DIN the Drug Identification Number (8-digit Health Canada identifier)
          * @param bvalue if {@code true}, include HTML-formatted content in the result
          * @return a Vector of Hashtables containing the drug record, empty if not found
+         * @throws XmlRpcFaultException if the catalogue cannot supply a verified result
          */
-        public synchronized Vector get_drug_by_DIN(String DIN, boolean bvalue) {
-        	Vector drug = null;
-        	int pKey = get_drug_pkey_from_DIN(DIN); 
-        	
-        	if( pKey > 0 ) {
-        		drug = get_drug(pKey, bvalue);
-        	}
-        	return drug == null ? new Vector() : drug;
+        public synchronized Vector<Hashtable<String, Object>> get_drug_by_DIN(String DIN, boolean bvalue)
+                throws XmlRpcFaultException {
+            try {
+                return queryDao.getDrugByDIN(DIN);
+            } catch (RuntimeException failure) {
+                logger.error("DrugRef DIN lookup failed; failureType={}", failure.getClass().getSimpleName());
+                // Older clients interpret fault 0 as no result.
+                throw new XmlRpcFaultException(1, "DrugRef DIN lookup failed");
+            }
         }
         
         /**
