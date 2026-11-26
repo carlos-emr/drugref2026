@@ -29,6 +29,7 @@ import java.util.stream.Collectors;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.NonUniqueResultException;
 import jakarta.persistence.Query;
+import jakarta.persistence.TypedQuery;
 
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.Logger;
@@ -366,16 +367,16 @@ public class TablesDao {
      * @throws NonUniqueResultException when more than one product carries the DIN
      */
     static Integer findDrugIdFromDIN(EntityManager em, String din) {
-        CdDrugProduct product = findProductByDIN(em, din);
+        CdDrugProduct product = singleProductForDIN(productsByDIN(em, din).setMaxResults(2).getResultList(), din);
         return product == null ? null : product.getDrugCode();
     }
 
-    private static CdDrugProduct findProductByDIN(EntityManager em, String din) {
-        List<CdDrugProduct> products = em.createNamedQuery(
-                        "CdDrugProduct.findByDrugIdentificationNumber", CdDrugProduct.class)
-                .setParameter("drugIdentificationNumber", din)
-                .setMaxResults(2)
-                .getResultList();
+    private static TypedQuery<CdDrugProduct> productsByDIN(EntityManager em, String din) {
+        return em.createNamedQuery("CdDrugProduct.findByDrugIdentificationNumber", CdDrugProduct.class)
+                .setParameter("drugIdentificationNumber", din);
+    }
+
+    private static CdDrugProduct singleProductForDIN(List<CdDrugProduct> products, String din) {
         if (products.isEmpty()) {
             return null;
         }
@@ -398,8 +399,18 @@ public class TablesDao {
     }
 
     static Vector<Hashtable<String, Object>> getDrugByDIN(EntityManager em, String din) {
-        CdDrugProduct match = findProductByDIN(em, din);
-        if (match == null || !din.equals(match.getDrugIdentificationNumber())) {
+        if (din == null) {
+            return new Vector<>();
+        }
+        CdDrugProduct match;
+        try (var candidates = productsByDIN(em, din).getResultStream()) {
+            // A padded value can compare equal in SQL. Count exact DINs before checking uniqueness.
+            match = singleProductForDIN(candidates
+                    .filter(product -> din.equals(product.getDrugIdentificationNumber()))
+                    .limit(2)
+                    .toList(), din);
+        }
+        if (match == null) {
             return new Vector<>();
         }
         Integer drugCode = match.getDrugCode();

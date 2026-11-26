@@ -19,12 +19,16 @@ package io.github.carlos_emr.drugref2026.ca.dpd;
 import jakarta.persistence.EntityManager;
 import jakarta.persistence.EntityManagerFactory;
 import jakarta.persistence.NonUniqueResultException;
+import io.github.carlos_emr.drugref2026.DinXmlRpcTest;
 import org.hibernate.jpa.HibernatePersistenceConfiguration;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
+import java.sql.DriverManager;
 import java.util.Hashtable;
+import java.util.UUID;
 import java.util.Vector;
 
 import static org.assertj.core.api.Assertions.*;
@@ -37,17 +41,21 @@ class DrugIdFromDinTest {
     private EntityManager em;
 
     @BeforeEach void open() {
-        factory = new HibernatePersistenceConfiguration("drug-id-from-din-test")
+        factory = catalogue("jdbc:h2:mem:drug_id_from_din;DB_CLOSE_DELAY=-1", "sa", "");
+        em = factory.createEntityManager();
+    }
+
+    private static EntityManagerFactory catalogue(String url, String user, String password) {
+        return new HibernatePersistenceConfiguration("drug-id-from-din-test")
                 .managedClass(CdDrugProduct.class)
                 .managedClass(CdDrugSearch.class)
                 .managedClass(CdActiveIngredients.class)
                 .managedClass(CdForm.class)
                 .managedClass(CdTherapeuticClass.class)
-                .jdbcUrl("jdbc:h2:mem:drug_id_from_din;DB_CLOSE_DELAY=-1")
-                .jdbcCredentials("sa", "")
+                .jdbcUrl(url)
+                .jdbcCredentials(user, password)
                 .property("hibernate.hbm2ddl.auto", "create-drop")
                 .createEntityManagerFactory();
-        em = factory.createEntityManager();
     }
 
     @AfterEach void close() {
@@ -56,6 +64,10 @@ class DrugIdFromDinTest {
     }
 
     private int seed(String din, int drugCode) {
+        return seed(em, din, drugCode);
+    }
+
+    private static int seed(EntityManager em, String din, int drugCode) {
         em.getTransaction().begin();
         CdDrugProduct product = new CdDrugProduct();
         product.setDrugIdentificationNumber(din);
@@ -87,7 +99,7 @@ class DrugIdFromDinTest {
                 .isInstanceOf(NonUniqueResultException.class);
     }
 
-    @Test void usesTheDpdCodeEvenWhenTheProductIdPointsAtAnotherSearchEntry() {
+    @Test void usesTheDpdCodeEvenWhenTheProductIdPointsAtAnotherSearchEntry() throws Exception {
         int productId = seed("02247521", 71771);
         seed("00629367", 6529);
 
@@ -126,6 +138,20 @@ class DrugIdFromDinTest {
         var component = (Hashtable<?, ?>) components.getFirst();
         assertThat(component.get("strength")).isEqualTo(10f);
         assertThat(component.get("unit")).isEqualTo("MG");
+
+        var catalogue = new TablesDao() {
+            @Override
+            public Vector<Hashtable<String, Object>> getDrugByDIN(String din) {
+                return TablesDao.getDrugByDIN(em, din);
+            }
+        };
+        Vector<?> reply = (Vector<?>) DinXmlRpcTest.lookupEzetrol(catalogue);
+        assertThat(reply).hasSize(1);
+        var wireProduct = (Hashtable<?, ?>) reply.getFirst();
+        assertThat(wireProduct.get("regional_identifier")).isEqualTo("02247521");
+        assertThat(wireProduct.get("product")).isEqualTo("EZETROL 10MG");
+        var wireComponents = (Vector<?>) wireProduct.get("components");
+        assertThat(((Hashtable<?, ?>) wireComponents.getFirst()).get("strength")).isEqualTo("10.0");
     }
 
     @Test void readsTheExactProductWithoutABrandSearchIndexEntry() {
@@ -141,6 +167,35 @@ class DrugIdFromDinTest {
         seed("02247522", 71771);
         assertThatThrownBy(() -> TablesDao.getDrugByDIN(em, "02247521"))
                 .isInstanceOf(NonUniqueResultException.class);
+    }
+
+    @Test
+    @EnabledIfEnvironmentVariable(named = "DRUGREF_TEST_MARIADB_URL", matches = ".+")
+    void distinguishesExactAndPaddedDinsOnMariaDb() throws Exception {
+        String base = System.getenv("DRUGREF_TEST_MARIADB_URL");
+        String user = System.getenv("DRUGREF_TEST_MARIADB_USER");
+        String password = System.getenv("DRUGREF_TEST_MARIADB_PASSWORD");
+        String schema = "drugref_din_" + UUID.randomUUID().toString().replace("-", "");
+        try (var connection = DriverManager.getConnection(base, user, password);
+                var statement = connection.createStatement()) {
+            statement.execute("CREATE DATABASE " + schema + " CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci");
+            try (var mariaFactory = catalogue(base + schema, user, password);
+                    var maria = mariaFactory.createEntityManager()) {
+                seed(maria, "02247521 ", 111);
+                seed(maria, "02247521  ", 222);
+                seed(maria, "02247521", 71771);
+                seed(maria, "02247522 ", 333);
+
+                assertThat(TablesDao.getDrugByDIN(maria, "02247521")).singleElement().satisfies(drug ->
+                        assertThat(drug).containsEntry("product", "DPD BRAND 71771"));
+                assertThat(TablesDao.getDrugByDIN(maria, "02247522")).isEmpty();
+                assertThat(TablesDao.findDrugIdFromDIN(maria, "02247522")).isEqualTo(333);
+                assertThatThrownBy(() -> TablesDao.findDrugIdFromDIN(maria, "02247521"))
+                        .isInstanceOf(NonUniqueResultException.class);
+            } finally {
+                statement.execute("DROP DATABASE " + schema);
+            }
+        }
     }
 
     private int searchRow(int code, int category, String name) {

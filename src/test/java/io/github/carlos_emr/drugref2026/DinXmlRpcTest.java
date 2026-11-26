@@ -21,7 +21,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-class DinXmlRpcTest {
+public class DinXmlRpcTest {
     @Test
     void sendsAnEmptyArrayForAnUnknownDin() throws Exception {
         assertThat(lookup(null)).isEqualTo(new Vector<>());
@@ -43,7 +43,7 @@ class DinXmlRpcTest {
     }
 
     private static Object lookup(RuntimeException failure) throws Exception {
-        var dao = new TablesDao() {
+        return lookupEzetrol(new TablesDao() {
             @Override
             public Vector<Hashtable<String, Object>> getDrugByDIN(String din) {
                 assertThat(din).isEqualTo("02247521");
@@ -52,7 +52,11 @@ class DinXmlRpcTest {
                 }
                 return new Vector<>();
             }
-        };
+        });
+    }
+
+    /** Queries the supplied catalogue through the production XML-RPC handler. */
+    public static Object lookupEzetrol(TablesDao dao) throws Exception {
         var request = new ByteArrayInputStream("""
                 <methodCall>
                   <methodName>get_drug_by_DIN</methodName>
