@@ -97,7 +97,7 @@ Retrieve full drug details by internal primary key (as String).
 Convenience overload accepting an integer primary key.
 
 ### `get_drug_by_DIN(String DIN, boolean bvalue)`
-Retrieve full drug details by DIN (Drug Identification Number). Resolves DIN to internal key, then fetches. Returns `null` if DIN not found.
+Retrieve full drug details by DIN (Drug Identification Number), including leading zeros. The product's DPD drug code links the product to its catalogue details. An unknown DIN returns an empty array. An ambiguous product or a failed query returns a nonzero XML-RPC fault.
 
 ### `get_drug_2(String pkey, boolean html)`
 Retrieve drug details with category-aware handling:
@@ -111,7 +111,7 @@ Retrieve drug details with category-aware handling:
 ## Identifier Resolution Methods
 
 ### `get_drug_pkey_from_DIN(String DIN)`
-Resolve a DIN to the internal database primary key. Returns `0` if not found.
+Resolve a DIN to a product-table row ID. Returns `0` if absent. Product-table IDs and search-table IDs are independent.
 
 ### `get_drug_pkey_from_drug_id(String drugId)`
 Resolve a numeric drug ID (as String) to the internal primary key. Returns `0` for non-numeric or missing values.
